@@ -33,3 +33,6 @@ coolname>=2.2
 # Dataset building
 argdantic>=0.5
 huggingface_hub>=0.20
+pyarrow>=14.0
+networkx>=3.0
+pyyaml>=6.0

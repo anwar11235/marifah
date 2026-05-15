@@ -1,0 +1,36 @@
+# Default generator config (§2.4 of session prompt)
+# Vertical-agnostic: 10 generic primitives, 12 patterns, 50 workflows.
+# Full dataset sizes per spec §7.1.
+
+primitives:
+  - conditional
+  - aggregate
+  - lookup
+  - compare
+  - transform
+  - validate
+  - route
+  - terminate
+  - accumulate
+  - nop
+
+allow_cycles: false
+
+# OOD composition: reserve 15% of primitive-pair combinations (spec §7.4 / OD4-S)
+ood_holdout_fraction: 0.15
+ood_holdout_seed: 0
+
+# OOD size: 2–5× max training DAG size (spec §7.3 / OD3-S)
+ood_size_scale_min: 2.0
+ood_size_scale_max: 5.0
+
+# Split sizes (spec §7.1)
+split_sizes:
+  train:               800000
+  val:                  10000
+  test_id:              10000
+  test_ood_size:         5000
+  test_ood_composition:  5000
+
+# Top-level random seed (derives per-split seeds deterministically)
+seed: 42
