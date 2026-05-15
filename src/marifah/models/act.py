@@ -1,0 +1,276 @@
+"""Adaptive Computation Time (ACT) wrapper for CoralInner.
+
+CoralACT wraps CoralInner and manages:
+  - ACT carry: recurrent state + step counter + halting flags + current data
+  - Carry reset for halted sequences (swap in fresh batch data)
+  - Halting decisions: Q-learning with exploration during training
+  - Bootstrapped target Q-values via an extra inner forward pass
+  - Eval mode: always runs halt_max_steps (no early stopping)
+
+Data flow:
+    ACTLossHead.forward(carry, batch)
+      → CoralACT.forward(carry, batch)          # one segment
+        → CoralInner.forward(inner_carry, data)  # H×L recurrent steps
+      ← (new_carry, outputs_dict)
+    ← (new_carry, loss, metrics, preds, all_halted)
+"""
+
+from dataclasses import dataclass
+from typing import Dict, Optional
+
+import torch
+from torch import nn
+
+from marifah.models.coral_base import CoralConfig, CoralInner, InnerCarry
+from marifah.models.coral import CoralV3Inner, PredMetrics
+
+
+# ---------------------------------------------------------------------------
+# Carry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ACTCarry:
+    """Outer carry passed between ACT segments."""
+
+    inner_carry: InnerCarry
+    steps: torch.Tensor
+    halted: torch.Tensor
+    current_data: Dict[str, torch.Tensor]
+
+
+# ---------------------------------------------------------------------------
+# ACT wrapper
+# ---------------------------------------------------------------------------
+
+
+class CoralACT(nn.Module):
+    """ACT wrapper around CoralInner."""
+
+    def __init__(self, config: CoralConfig) -> None:
+        super().__init__()
+        if isinstance(config, dict):
+            config = CoralConfig(**config)
+        self.config = config
+        self.inner = CoralInner(config)
+
+    @property
+    def puzzle_emb(self):
+        return self.inner.puzzle_emb
+
+    def initial_carry(self, batch: Dict[str, torch.Tensor]) -> ACTCarry:
+        batch_size = batch["inputs"].shape[0]
+        device = batch["inputs"].device
+        return ACTCarry(
+            inner_carry=self.inner.empty_carry(batch_size, device=device),
+            steps=torch.zeros(batch_size, dtype=torch.int32, device=device),
+            halted=torch.ones(batch_size, dtype=torch.bool, device=device),
+            current_data={k: torch.empty_like(v) for k, v in batch.items()},
+        )
+
+    def forward(
+        self,
+        carry: ACTCarry,
+        batch: Dict[str, torch.Tensor],
+    ) -> tuple:
+        # --- 1. Reset halted sequences ---
+        new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
+        new_steps = torch.where(carry.halted, torch.zeros_like(carry.steps), carry.steps)
+        new_current_data = {
+            k: torch.where(
+                carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)),
+                batch[k],
+                v,
+            )
+            for k, v in carry.current_data.items()
+        }
+
+        # --- 2. Run inner model ---
+        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(
+            new_inner_carry, new_current_data
+        )
+
+        outputs: Dict[str, torch.Tensor] = {
+            "logits": logits,
+            "q_halt_logits": q_halt_logits,
+            "q_continue_logits": q_continue_logits,
+        }
+
+        # --- 3. Halting logic ---
+        with torch.no_grad():
+            new_steps = new_steps + 1
+            is_last_step = new_steps >= self.config.halt_max_steps
+            halted = is_last_step
+
+            if self.training and self.config.halt_max_steps > 1:
+                halted = halted | (q_halt_logits > q_continue_logits)
+
+                exploration_mask = torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
+                min_halt_steps = exploration_mask.to(torch.int32) * torch.randint_like(
+                    new_steps, low=2, high=self.config.halt_max_steps + 1
+                )
+                halted = halted & (new_steps >= min_halt_steps)
+
+                # --- 4. Bootstrap target Q ---
+                next_q_halt, next_q_continue = self.inner(new_inner_carry, new_current_data)[-1]
+                target_q_continue = torch.sigmoid(
+                    torch.where(
+                        is_last_step,
+                        next_q_halt,
+                        torch.maximum(next_q_halt, next_q_continue),
+                    )
+                )
+                outputs["target_q_continue"] = target_q_continue
+
+        new_carry = ACTCarry(
+            inner_carry=new_inner_carry,
+            steps=new_steps,
+            halted=halted,
+            current_data=new_current_data,
+        )
+        return new_carry, outputs
+
+
+# ---------------------------------------------------------------------------
+# CoralV3ACT — ACT wrapper for CoralV3Inner (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+class CoralV3ACT(nn.Module):
+    """ACT wrapper around CoralV3Inner.
+
+    Identical to CoralACT except:
+      - Uses CoralV3Inner instead of CoralInner.
+      - Handles the optional 4th return value (PredMetrics) from CoralV3Inner.
+      - Forwards epsilon_final, pi_final, and logging scalars through outputs dict.
+
+    Note: @torch.compiler.disable prevents dynamo from tracing through this
+    function when the outer model is compiled. The hot transformer kernels
+    (H_level, L_level) are compiled as standalone sub-modules in build_model.
+    """
+
+    def __init__(self, config: CoralConfig) -> None:
+        super().__init__()
+        if isinstance(config, dict):
+            config = CoralConfig(**config)
+        self.config = config
+        self.inner = CoralV3Inner(config)
+
+    @property
+    def puzzle_emb(self):
+        return self.inner.puzzle_emb
+
+    def initial_carry(self, batch: Dict[str, torch.Tensor]) -> ACTCarry:
+        batch_size = batch["inputs"].shape[0]
+        device = batch["inputs"].device
+        return ACTCarry(
+            inner_carry=self.inner.empty_carry(batch_size, device=device),
+            steps=torch.zeros(batch_size, dtype=torch.int32, device=device),
+            halted=torch.ones(batch_size, dtype=torch.bool, device=device),
+            current_data={k: torch.empty_like(v) for k, v in batch.items()},
+        )
+
+    @torch.compiler.disable(recursive=False)
+    def forward(
+        self,
+        carry: ACTCarry,
+        batch: Dict[str, torch.Tensor],
+    ) -> tuple:
+        # --- 1. Reset halted sequences ---
+        new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
+        new_steps = torch.where(carry.halted, torch.zeros_like(carry.steps), carry.steps)
+        new_current_data = {
+            k: torch.where(
+                carry.halted.view((-1,) + (1,) * (batch[k].ndim - 1)),
+                batch[k],
+                v,
+            )
+            for k, v in carry.current_data.items()
+        }
+
+        _steps_before = torch.where(carry.halted, torch.zeros_like(carry.steps), carry.steps)
+        _is_last_segment = bool((_steps_before + 1 >= self.config.halt_max_steps).any())
+
+        # --- 2. Run inner model ---
+        inner_result = self.inner(new_inner_carry, new_current_data, is_last_segment=_is_last_segment)
+        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = inner_result[:3]
+
+        outputs: Dict[str, torch.Tensor] = {
+            "logits": logits,
+            "q_halt_logits": q_halt_logits,
+            "q_continue_logits": q_continue_logits,
+        }
+
+        _any_mechanism = (
+            self.config.use_predictive_coding
+            or self.config.use_columnar_routing
+            or self.config.use_crystallization
+        )
+        if _any_mechanism:
+            pred_metrics: PredMetrics = inner_result[3]
+            if pred_metrics.epsilon_final is not None:
+                outputs["epsilon_final"] = pred_metrics.epsilon_final  # type: ignore[assignment]
+                outputs["pi_final"] = pred_metrics.pi_final  # type: ignore[assignment]
+            if pred_metrics.pred_error_norms:
+                outputs["prediction_error"] = torch.stack(pred_metrics.pred_error_norms).mean()
+                outputs["precision_mean"] = torch.stack(pred_metrics.precision_means).mean()
+            if pred_metrics.routing_logits_H is not None:
+                outputs["routing_logits_H"] = pred_metrics.routing_logits_H  # type: ignore[assignment]
+                outputs["routing_logits_L"] = pred_metrics.routing_logits_L  # type: ignore[assignment]
+            if pred_metrics.moe_recon_loss is not None:
+                outputs["moe_recon_loss"] = pred_metrics.moe_recon_loss  # type: ignore[assignment]
+            if pred_metrics.moe_lb_loss is not None:
+                outputs["moe_lb_loss"] = pred_metrics.moe_lb_loss        # type: ignore[assignment]
+            if self.config.use_crystallization:
+                outputs["moe_passthrough_weight"] = torch.tensor(
+                    pred_metrics.moe_passthrough_weight,
+                    device=logits.device,
+                    dtype=torch.float32,
+                )
+                if pred_metrics.moe_routing_entropy is not None:
+                    outputs["moe_routing_entropy"] = torch.tensor(
+                        pred_metrics.moe_routing_entropy,
+                        device=logits.device,
+                        dtype=torch.float32,
+                    )
+                if pred_metrics.moe_codebook_util_frac is not None:
+                    outputs["moe_codebook_util_frac"] = torch.tensor(
+                        pred_metrics.moe_codebook_util_frac,
+                        device=logits.device,
+                        dtype=torch.float32,
+                    )
+
+        # --- 3. Halting logic ---
+        with torch.no_grad():
+            new_steps = new_steps + 1
+            is_last_step = new_steps >= self.config.halt_max_steps
+            halted = is_last_step
+
+            if self.training and self.config.halt_max_steps > 1:
+                halted = halted | (q_halt_logits > q_continue_logits)
+
+                exploration_mask = torch.rand_like(q_halt_logits) < self.config.halt_exploration_prob
+                min_halt_steps = exploration_mask.to(torch.int32) * torch.randint_like(
+                    new_steps, low=2, high=self.config.halt_max_steps + 1
+                )
+                halted = halted & (new_steps >= min_halt_steps)
+
+                # --- 4. Bootstrap target Q ---
+                next_q_halt, next_q_continue = self.inner(new_inner_carry, new_current_data)[2]
+                target_q_continue = torch.sigmoid(
+                    torch.where(
+                        is_last_step,
+                        next_q_halt,
+                        torch.maximum(next_q_halt, next_q_continue),
+                    )
+                )
+                outputs["target_q_continue"] = target_q_continue
+
+        new_carry = ACTCarry(
+            inner_carry=new_inner_carry,
+            steps=new_steps,
+            halted=halted,
+            current_data=new_current_data,
+        )
+        return new_carry, outputs

@@ -1,0 +1,35 @@
+# Core
+torch>=2.4,<2.7
+numpy>=1.24
+
+# Attention kernel (OPTIONAL — A100/H100 performance optimisation)
+# marifah.models.layers._get_flash_attn_func() falls back to
+# PyTorch's scaled_dot_product_attention if flash-attn is not installed.
+#
+# Pin: 2.7.4.post1 is the last version ABI-compatible with torch 2.6.
+# flash-attn 2.8.x uses symbols absent in torch 2.6 and crashes at import.
+#
+# To install (A100-only sm_80 build, ~4× faster than full build):
+#     FLASH_ATTN_CUDA_ARCHS=80 pip install flash-attn==2.7.4.post1 --no-build-isolation
+
+# Optimizer — adam-atan2-pytorch is the fused CUDA variant; required for training perf.
+# Falls back to pure-PyTorch AdamAtan2 (marifah/training/adam_atan2.py).
+adam-atan2>=0.0.3
+adam-atan2-pytorch>=0.3.2
+
+# Config / CLI
+pydantic>=2.0
+hydra-core>=1.3
+omegaconf>=2.3
+
+# Logging
+wandb>=0.16
+
+# Utilities
+tqdm>=4.0
+einops>=0.7
+coolname>=2.2
+
+# Dataset building
+argdantic>=0.5
+huggingface_hub>=0.20
