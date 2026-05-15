@@ -19,9 +19,9 @@ Commercial validation track for CORAL architecture. Pivoted from CORAL-v3 (Sudok
 | CORAL | First CRA instance (Cortical Reasoning via Abstraction Layers) |
 | Nous / Nous substrate | The Reasoning Cortex — the CORAL inference engine (CoralInner / CoralV3Inner) |
 | Marifah mechanism | The Recognition Cortex — SpatialMoECodebook crystallization |
-| ʿIlm-class | Core architecture modules (CORAL, HRM-derived) |
-| Nous-class | Reasoning substrate modules (CoralInner, ACT) |
-| Marifah-class | Recognition/amortization modules (codebook, crystallization) |
+| ʿIlm-class | Systems whose knowledge is retrieval/pattern-matching (LLMs) — what CORAL is positioned against |
+| Nous-class | Systems that do deliberate iterative reasoning — CORAL's Nous substrate qualifies |
+| Marifah-class | Systems with recognition-based compounding at deployment — CORAL + Recognition Cortex is the first commercial instance |
 | Phase 1 | Predictive coding (`use_predictive_coding=True`) |
 | Phase 2 | Columnar routing — STUBBED, NotImplementedError |
 | Phase 3b | Soft MoE crystallization (`use_crystallization=True`) |
