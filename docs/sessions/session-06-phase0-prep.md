@@ -52,9 +52,15 @@
 
 ---
 
+## Instance configuration
+
+User is provisioning a **Quebec, CA — 2× A100 SXM4 40GB** instance. Two GPUs enable parallel execution of the cold and warm comparison runs, cutting wall-clock from ~5–6 hours (sequential) to ~3–4 hours (parallel). The runbook (`docs/operations/session06_runbook.md`) documents both the parallel path (§5) and a sequential fallback (§Fallback).
+
+Note: each GPU is 40GB, not 80GB. If Phase 0's `batch_size=64, d_model=512` OOMs on 40GB, an 80GB instance is needed for Session 7 main launch.
+
 ## Pending (awaiting user's Vast.ai execution)
 
-Items 7–11 of the §4 verification sequence, the warm-start verdict, and Phase 0 config finalization all require the user to execute the §2.4 runbook on Vast.ai and share results back. These are tracked in `docs/sessions/session-06-warmstart-verdict.md` (currently a placeholder).
+Items 7–11 of the §4 verification sequence, the warm-start verdict, and Phase 0 config finalization all require the user to execute the runbook on Vast.ai and share results back. These are tracked in `docs/sessions/session-06-warmstart-verdict.md` (currently a placeholder).
 
 **Pre-launch checklist status:**
 
