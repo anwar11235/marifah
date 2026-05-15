@@ -38,6 +38,7 @@ from marifah.models.codebook import (
 )
 from marifah.models.prediction import PredictionNet, PrecisionNet
 from marifah.models.transformer_block import TransformerBlockConfig
+from marifah.models.hmsc.hmsc import HMSC
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,9 @@ class PredMetrics:
     moe_passthrough_weight: float = field(default=1.0)
     moe_routing_entropy: Optional[float] = field(default=None)
     moe_codebook_util_frac: Optional[float] = field(default=None)
+    # Session 4: HMSC fields
+    hmsc_aux_losses: Optional[Dict] = field(default=None)
+    hmsc_utilization: Optional[Dict] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +110,11 @@ class CoralV3Inner(CoralInner):
             self.crystal_buffer = CrystallizationBuffer(
                 capacity=config.crystal_buffer_capacity,
             )
+
+        if config.use_hmsc:
+            self.hmsc = HMSC(d_model=config.hidden_size)
+        else:
+            self.hmsc: Optional[HMSC] = None
 
     def _apply_moe_mixing(
         self,
@@ -282,6 +291,31 @@ class CoralV3Inner(CoralInner):
                     (w_cb_mean > 0.01).float().mean().item()
                 )
 
+        # --- HMSC tap: augment z_H after final H-step, before lm_head ---
+        # z_H is in the computation graph here; HMSC composed output augments it.
+        # The carry stored for the next ACT step includes the HMSC contribution.
+        hmsc_aux_losses: Optional[Dict] = None
+        hmsc_utilization: Optional[Dict] = None
+        if self.hmsc is not None:
+            node_mask = batch.get("node_mask")
+            if node_mask is None:
+                # Fallback: treat all positions as real nodes
+                node_mask = torch.ones(
+                    z_H.shape[0], z_H.shape[1],
+                    dtype=torch.float32, device=z_H.device,
+                )
+            hmsc_out = self.hmsc(
+                carry_state=z_H.float(),
+                node_mask=node_mask.float(),
+                workflow_labels=batch.get("workflow_labels"),
+                region_labels=batch.get("region_labels"),
+                primitive_labels=batch.get("primitive_labels"),
+            )
+            # Add composed to z_H (residual augmentation)
+            z_H = z_H + hmsc_out["composed"].to(z_H.dtype)
+            hmsc_aux_losses = hmsc_out["aux_losses"]
+            hmsc_utilization = hmsc_out["codebook_utilization"]
+
         new_carry = InnerCarry(z_H=z_H.detach(), z_L=z_L.detach())
         output = self.lm_head(z_H)[:, self.puzzle_emb_len:]
         q_logits = self.q_head(z_H[:, 0]).to(torch.float32)
@@ -296,5 +330,7 @@ class CoralV3Inner(CoralInner):
             moe_passthrough_weight=moe_pt_weight,
             moe_routing_entropy=moe_routing_entropy,
             moe_codebook_util_frac=moe_codebook_util_frac,
+            hmsc_aux_losses=hmsc_aux_losses,
+            hmsc_utilization=hmsc_utilization,
         )
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1]), pred_metrics

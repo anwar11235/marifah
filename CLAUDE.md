@@ -41,6 +41,14 @@ src/marifah/
     layers.py        CastedLinear, CastedEmbedding, Attention, SwiGLU, RotaryEmbedding
     transformer_block.py TransformerBlock, TransformerBlockConfig
     sparse_embedding.py  CastedSparseEmbedding, CastedSparseEmbeddingSignSGD_Distributed
+    hmsc/
+      __init__.py          package + re-exports
+      global_codebook.py   GlobalCodebook (G-scale: workflow signatures)
+      regional_codebook.py RegionalCodebook (R-scale: sub-DAG patterns)
+      perposition_codebook.py PerPositionCodebook (P-scale: primitives)
+      composition.py       HMSCComposition (sum default, gated alternative)
+      auxiliary_heads.py   GlobalAuxHead, RegionalAuxHead, PerPositionAuxHead, compute_aux_losses
+      hmsc.py              HMSC top-level module
   training/
     losses.py        ACTLossHead, CoralV3LossHead, stablemax_cross_entropy
     scheduler.py     cosine_schedule_with_warmup_lr_lambda
@@ -279,3 +287,53 @@ Total: 195/195 tests passing (includes all Session 1 + 2 tests).
 - Full dataset generation on Vast.ai (800K train DAGs).
 - Wire graph adapter into main training loop (`train.py`) with graph-specific `seq_len = max_nodes`.
 - W&B workspace migration from `aktuator-ai`.
+
+---
+
+### Session 4 — 2026-05-15
+
+**Goal:** Implement the Hierarchical Multi-Scale Codebook (HMSC) — three codebooks (G, R, P), composition, and auxiliary loss heads. Lambdas = 0 (losses computed but don't engage this session).
+
+**Exit criteria status:** All criteria met.
+
+**Modules implemented** (`src/marifah/models/hmsc/`):
+
+| Module | LOC | Contents |
+|--------|-----|----------|
+| `__init__.py` | 31 | Package marker + re-exports |
+| `global_codebook.py` | 64 | `GlobalCodebook`: mean-pool → softmax routing → broadcast mode |
+| `regional_codebook.py` | 144 | `RegionalCodebook`: region-token attention pooling → per-region routing → soft/hard assignment |
+| `perposition_codebook.py` | 81 | `PerPositionCodebook`: per-node cross-attention; soft (train) / hard top-1 (eval) |
+| `composition.py` | 85 | `HMSCComposition`: sum (default) or gated |
+| `auxiliary_heads.py` | 135 | `GlobalAuxHead`, `RegionalAuxHead`, `PerPositionAuxHead`, `compute_aux_losses` |
+| `hmsc.py` | 176 | `HMSC` top-level module with utilization tracking |
+
+**CORAL modifications:**
+- `coral_base.py`: added `use_hmsc: bool = False` to `CoralConfig`
+- `coral.py`: added HMSC import; `hmsc_aux_losses`/`hmsc_utilization` to `PredMetrics`; HMSC instantiation in `__init__`; HMSC tap in `_forward_with_pc` (post-final-H-step, pre-lm_head, residual addition)
+
+**Tests:** 60 new tests; 255/255 total passing.
+
+**Verification results:**
+1. ✅ 255/255 tests pass
+2. ✅ composed shape `(B, N, 512)` confirmed
+3. ✅ Aux losses finite at random init (L_G=4.23, L_R=2.45, L_P=2.30 — near log(vocab_size) as expected)
+4. ✅ Determinism: max_diff = 0.0 across two identical forward passes
+5. ✅ Regression check: `use_hmsc=False` max_diff = 0.0 (bit-identical to pre-HMSC)
+6. ✅ Gradient flow with lambda>0: all codebook, routing, composition, aux head params have finite gradients
+7. ✅ Head gradient = 0.00e+00 with lambda=0
+8. ✅ Utilization at random init: G active=87.5%, R active=100%, P active=100%; non-zero entropy (no dead codes)
+9. ✅ End-to-end smoke test: CoralV3Inner + HMSC + backward, all finite
+
+**Key architectural decisions:**
+- HMSC tap: post-final-H-step in `_forward_with_pc`, where z_H is still in computation graph → gradients flow via main loss path
+- Residual addition `z_H = z_H + composed` (not replacement) for stability at random init
+- `node_mask` is optional in CORAL batch dict; falls back to all-ones for non-graph inputs
+- Regional codebook uses custom attention (not `nn.MultiheadAttention`) for symmetric node-to-region soft assignment
+
+**Open items for Session 5:**
+- Training pipeline integration: wire adapter + HMSC + CORAL into main training loop with W&B logging and configurable lambdas
+- `node_mask` must be threaded through from graph batch to CORAL batch dict
+- `region_labels` mapping: generator produces per-node labels; R-head expects per-region — needs mapping logic
+- Full dataset generation on Vast.ai (800K train DAGs)
+- W&B workspace migration from `aktuator-ai`

@@ -79,6 +79,9 @@ class CoralConfig(BaseModel):
     lambda_moe_recon: float = 0.1
     lambda_moe_balance: float = 0.01
 
+    # Session 4: HMSC (Hierarchical Multi-Scale Codebook)
+    use_hmsc: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Carry
