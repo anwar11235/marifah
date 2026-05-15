@@ -36,9 +36,9 @@ training:
   lambda_P: 0.0
   main_loss_weight: 1.0
   halt_loss_weight: 0.1
-  drop_last: true
 
 data:
+  drop_last: true
   dataset_root: /tmp/marifah_full_dataset
   num_workers: 4
   pin_memory: true

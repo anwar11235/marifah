@@ -61,7 +61,7 @@ src/marifah/
     checkpointing.py save_checkpoint, load_checkpoint (Session 5)
     logging.py       TrainingLogger — W&B + JSONL (Session 5)
     eval_loop.py     evaluate() for graph val split (Session 5)
-    trainer.py       build_model, Trainer class (Session 5)
+    trainer.py       build_model, Trainer class; max_steps support (Sessions 5–6)
     cli.py           train / eval / smoke CLI (Session 5)
   data/
     base_dataset.py  PuzzleDataset, create_dataloader (HRM-format)
@@ -415,3 +415,59 @@ Total: 195/195 tests passing (includes all Session 1 + 2 tests).
 - Update `configs/phase0.yaml` `data.dataset_root` to Vast.ai path
 - Verify GPU memory at batch_size=64, d_model=512, H_layers=2
 - Workflow-type AUC probe after Phase 0 checkpoint (§7 decision gate)
+
+---
+
+### Session 6 — 2026-05-15
+
+**Goal:** Pre-launch preparation — trainer `max_steps` support, warm-start comparison configs + probe (resolves OD7), container image docs, and Vast.ai runbook. Does not launch Phase 0 (that's Session 7).
+
+**Exit criteria status:** CC-local work complete. Items 7–11 (Vast.ai execution + analysis) pending user runbook execution.
+
+**Code changes:**
+
+| Change | Location | Notes |
+|--------|----------|-------|
+| `max_steps: Optional[int] = None` | `config.py` `TrainingPhaseConfig` | Hard step cap; used by warmstart comparison runs (5K steps each) |
+| `max_steps` wired in training loop | `trainer.py` `Trainer.train()` | Breaks inner + outer loop cleanly when hit; `final.pt` always saved |
+| `drop_last` moved to correct section | `phase0.yaml` | Was under `training:` (ignored); moved to `data:` where `DataConfig` reads it |
+
+**New files:**
+
+| File | Contents |
+|------|----------|
+| `configs/warmstart_cold.yaml` | OD7 cold run — fresh init, max_steps=5000, eval_interval_epochs=1 |
+| `configs/warmstart_warm.yaml` | OD7 warm run — Sudoku Phase 3c init, same otherwise |
+| `scripts/warmstart_probe.py` | Probe script: workflow-type AUC (linear probe on pooled z_H) + execution faithfulness (edit distance) |
+| `docs/operations/container_image.md` | Container image deps, Vast.ai provisioning steps, validation status (pending Vast execution) |
+| `docs/operations/session06_runbook.md` | User-facing Vast.ai runbook: verification → dataset generation → cold run → warm run → probes → share results |
+| `docs/sessions/session-06-phase0-prep.md` | Session summary (this file) |
+| `docs/sessions/session-06-warmstart-verdict.md` | Placeholder — verdict table + decision populated after user shares results |
+
+**CC-local verification results:**
+1. ✅ Sudoku Phase 3c checkpoint intact and loadable (51 keys, `OrderedDict`)
+2. ✅ `warmstart_cold.yaml` parses: `max_steps=5000`, `warm_start.checkpoint=None`
+3. ✅ `warmstart_warm.yaml` parses: `max_steps=5000`, `warm_start.checkpoint=...phase3c...`
+4. ✅ Probe runs end-to-end on tiny dataset (Sudoku ckpt as dummy): no errors, results JSON written
+5. ✅ `pytest tests/` — 280/280 pass with trainer changes
+6. ✅ Container image doc and runbook complete
+
+**Key architectural decisions:**
+- **Probe operationalizes codebook §7.1**: Pools `z_H` over `node_mask` real positions → mean pooled carry state → linear probe → macro OvR AUC. This is the "pooled readout" referenced in the gating logic.
+- **Faithfulness probe as primitive-id edit distance**: Argmax logits at real nodes vs. `primitive_assignments` ground truth. Normalized Levenshtein per DAG, averaged. Covers codebook design §6.1.
+- **Warm run uses `load_optimizer: false`**: Tests only initialization effect, not Sudoku optimization trajectory.
+- **Warm-start checkpoint path**: actual file is `phase3c_canonical_seed0_best.pt` (not `best.pt`).
+
+**Pending (Session 6 not complete until user executes Vast.ai runbook):**
+- Container image verification (pass/fail + any errors)
+- Full dataset generation (time, distribution stats)
+- Warmstart cold + warm runs (5K steps each, ~1–2 hours each)
+- Probe runs on both final checkpoints
+- Results JSONs shared back to CC
+- Warm-start verdict written + Phase 0 config finalized
+
+**Open items for Session 7:**
+- Phase 0 main launch (same instance, same runbook pattern as warm-start comparison)
+- Early checkpoint probe at ~5K steps (codebook §8.2: AUC < 0.3 → stop)
+- Midpoint probe at ~20K steps
+- Final probe at ~50K+ steps (§7 decision gate: Path A/B/C)

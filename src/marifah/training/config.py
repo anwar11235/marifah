@@ -59,6 +59,7 @@ class TrainingPhaseConfig(BaseModel):
     lambda_P: float = 0.0
     main_loss_weight: float = 1.0
     halt_loss_weight: float = 0.1     # down-weighted for single-step training
+    max_steps: Optional[int] = None          # hard step cap; exits before max_epochs if hit
     save_every_n_steps: Optional[int] = None
     early_stopping_patience: Optional[int] = None
 

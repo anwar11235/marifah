@@ -1,0 +1,56 @@
+# Warm-start comparison — cold run (from-scratch init)
+# Resolves codebook design OD7: Sudoku Phase 3c warm-start vs. from-scratch.
+# One variable: initialization only. Everything else identical to warmstart_warm.yaml.
+# Run for max_steps=5000 steps (exits before max_epochs; see trainer.py max_steps gate).
+
+experiment:
+  name: warmstart_cold
+  phase: 0
+  seed: 42
+
+model:
+  d_model: 512
+  num_heads: 8
+  H_cycles: 1
+  L_cycles: 1
+  H_layers: 2
+  L_layers: 2
+  use_hmsc: false
+  hmsc: null
+  vocab_size: 10
+  max_nodes: 100
+  halt_max_steps: 4
+  halt_exploration_prob: 0.1
+  forward_dtype: "float32"
+
+training:
+  batch_size: 64
+  max_epochs: 100          # will exit at max_steps, not max_epochs
+  max_steps: 5000          # hard step cap for comparison run
+  eval_interval_epochs: 1  # frequent eval for comparison
+  learning_rate: 1.0e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  mixed_precision: bf16
+  lambda_G: 0.0
+  lambda_R: 0.0
+  lambda_P: 0.0
+  main_loss_weight: 1.0
+  halt_loss_weight: 0.1
+
+data:
+  dataset_root: /workspace/data/marifah_full_dataset
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+
+logging:
+  wandb_mode: online
+  wandb_project: marifah-core
+  log_interval_steps: 50
+  utilization_interval_steps: 500
+  checkpoint_dir: checkpoints/warmstart_cold/
+
+warm_start:
+  checkpoint: null

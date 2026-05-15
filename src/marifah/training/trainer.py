@@ -163,8 +163,11 @@ class Trainer:
 
         best_val_loss: Optional[float] = None
         patience_counter = 0
+        _stop_training = False
 
         for epoch in range(self.start_epoch, cfg.max_epochs):
+            if _stop_training:
+                break
             self.model.train()
             epoch_losses: Dict[str, float] = {}
 
@@ -185,6 +188,11 @@ class Trainer:
                                      f"step_{self.global_step:07d}.pt"),
                         epoch,
                     )
+
+                if cfg.max_steps is not None and self.global_step >= cfg.max_steps:
+                    logger.info("max_steps=%d reached at epoch %d; stopping.", cfg.max_steps, epoch)
+                    _stop_training = True
+                    break
 
             n_steps = max(len(train_loader), 1)
             logger.info(
@@ -229,7 +237,8 @@ class Trainer:
             self.model.train()
 
         final = os.path.join(self.config.logging.checkpoint_dir, "final.pt")
-        self._save(final, cfg.max_epochs - 1)
+        last_epoch = min(self.start_epoch + cfg.max_epochs - 1, cfg.max_epochs - 1)
+        self._save(final, last_epoch)
         self.logger.finish()
 
     def step(self, batch) -> Dict[str, float]:
