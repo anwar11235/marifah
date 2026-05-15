@@ -147,9 +147,67 @@ checkpoints/
 
 **Open items / notes for subsequent sessions:**
 - HMSC codebook module (Session 3+) — `SpatialMoECodebook` is scaffolding; the real Marifah mechanism is designed in `CORAL_DAG_Codebook_Design.md`.
-- Graph adapter (Session 2 candidate) — no graph-specific code exists yet.
-- Synthetic DAG benchmark generator (Session 2 candidate) — designed in `CORAL_Synthetic_DAG_Benchmark_Spec.md`.
+- Graph adapter (Session 3 candidate) — no graph-specific code exists yet. Synthetic data is ready.
 - W&B workspace migration (separate decision) — currently points at `aktuator-ai`.
 - Eval-wedge diagnostic (separate CORAL-v3 work, not ported) — may need resolution before warm-start testing.
 - The codebook scaffolding (`SpatialMoECodebook`) has a coupling to Sudoku-specific `seq_len=81` in the existing CORAL-v3 configs. The graph adapter will need to reconfigure `seq_len` to match DAG node count. Not a code change, just a config consideration.
 - Docker image push: do on first Vast.ai provisioning.
+
+---
+
+### Session 2 — 2026-05-15
+
+**Goal:** Implement the full synthetic DAG benchmark generator per `CORAL_Synthetic_DAG_Benchmark_Spec.md`.
+
+**Exit criteria status:** All criteria met.
+
+**Modules implemented** (`src/marifah/data/synthetic/`):
+
+| Module | Contents |
+|--------|----------|
+| `primitives.py` | 10 `PrimitiveType` enums, `apply_primitive()`, `sample_attrs()` |
+| `executor.py` | `execute_dag()` — topological-order reference executor with branch routing |
+| `patterns.py` | 12 pattern classes (`LinearChain` … `ConstrainedTerminate`), `PATTERN_BY_ID` registry |
+| `workflows.py` | 50 `WorkflowSpec` definitions (seed=42), frequency tiers, `validate_coverage()`, `build_reserved_primitive_pairs()` |
+| `labels.py` | `DAGRecord`, `NodeRecord`, `EdgeRecord`, `RegionAssignment`, `audit_labels()` |
+| `vertical_config.py` | `GeneratorConfig`, `SplitSizes`, `load_config()`, `tiny_config()` |
+| `generator.py` | `generate_one()` + `DagGenerator` with `multiprocessing.Pool` support |
+| `splits.py` | `SplitGenerator` with disjoint seed ranges per split |
+| `storage.py` | Parquet write/read, `write_manifest()` + `verify_manifest()` with SHA256 |
+| `validate.py` | `validate_record()`, `audit_distribution()`, `spot_check_traces()` |
+| `cli.py` | `generate-tiny`, `generate-full`, `validate-dataset` subcommands |
+| `cyclic.py` | Stub raising `CyclicNotImplementedError` |
+
+**Config:** `configs/default.yaml` — full split sizes, OOD parameters, seed.
+
+**Tests:** 130 unit tests across 5 test files — all passing.
+
+**Verification results:**
+1. ✅ `pytest tests/` — 130/130 passed
+2. ✅ `generate-tiny` — 1023 DAGs across all 5 splits in ~2s
+3. ✅ `validate-dataset` — PASSED (all splits OK, manifest verified)
+4. ✅ Determinism — byte-identical SHA256 shards across two independent runs
+5. ✅ Throughput — ~950 DAGs/sec single-threaded
+6. ✅ Spot-check traces — executor re-execution matches stored halt_step
+7. ✅ Coverage — all 12 patterns in ≥5 workflows; `validate_coverage()` passes
+
+**Bugs found and fixed:**
+
+1. **Training split producing 0 records** — OOD holdout filter checked ALL edges in assembled DAG (40–150+). For complex workflows, P(no reserved pair) ≈ 0.001% with 20 retries. Fix: changed to check only cross-pattern boundary edges (`_cross_pattern_primitive_pairs`), which is the correct spec interpretation. This reduced the check from ~90 edges to ~1-4 inter-pattern edges per DAG.
+
+2. **Executor forwarding branch_id instead of input state** — Conditional/route nodes were writing `result.output_state` (= branch_id integer) into `node_outputs`, causing downstream nodes to receive 0 or 1 instead of the actual data value. Fix: `node_outputs[node_id] = input_for_prim` for branching nodes.
+
+3. **No TERMINATE node in assembled workflows** — Patterns like `linear_chain`, `conditional_fork`, `fork_and_join` don't include TERMINATE. Fix: `_assemble_workflow` now appends a synthetic TERMINATE node when final pattern exits aren't TERMINATE nodes.
+
+4. **Executor falsely reporting `halted=True`** — Old code set `halt_step = trace[-1].step` as fallback. Fix: removed fallback; `halted` is strictly `halt_step >= 0` (only when TERMINATE fires).
+
+5. **JSON integer key round-trip in LOOKUP** — `sample_lookup_attrs` stores `{0: v, 1: v, ...}`. JSON serializes dict keys as strings; `_apply_lookup` then did `table.get(int_key, 0)` → always 0 (key type mismatch). This corrupted all LOOKUP outputs after deserialization, breaking spot-check executor consistency. Fix: `_apply_lookup` now normalizes `{int(k): v for k, v in table.items()}`.
+
+6. **Windows UnicodeEncodeError** — CLI used `→` (U+2192); Windows cp1252 terminal can't encode it. Fix: replaced all `→` with `->` in `cli.py`.
+
+7. **Parquet read bug in CLI** — `t.to_pydict()` extends list with column name strings, not row dicts. Fix: changed to `t.to_pylist()`.
+
+**Open items for Session 3:**
+- Graph adapter: wire `DagGenerator` output into a PyTorch Dataset + DataLoader for CORAL training. `seq_len` = max DAG node count (variable; pad to max).
+- Full dataset generation on Vast.ai (800K train takes ~14 min at 950 DAGs/sec single-threaded; use `--workers` to parallelize).
+- HMSC codebook session (Session 3+).
