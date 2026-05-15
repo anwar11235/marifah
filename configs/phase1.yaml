@@ -1,0 +1,67 @@
+# Phase 1: HMSC engaged with auxiliary supervision.
+# Launched after Phase 0 verdict passes the §7 gate.
+# Lambdas at design-spec defaults (λ_G = λ_R = λ_P = 0.1 per codebook design §5.3).
+
+experiment:
+  name: phase1_hmsc_engaged
+  phase: 1
+  seed: 42
+
+model:
+  d_model: 512
+  num_heads: 8
+  H_cycles: 1
+  L_cycles: 1
+  H_layers: 2
+  L_layers: 2
+  use_hmsc: true
+  hmsc:
+    K_G: 64
+    K_R: 16
+    K_P: 16
+    d_G: 512
+    d_R: 256
+    d_P: 128
+    num_regions: 8
+    composition_method: sum
+    p_discreteness: soft
+    num_workflow_types: 50
+    num_pattern_types: 12
+    num_primitives: 10
+  vocab_size: 10
+  max_nodes: 100
+  halt_max_steps: 4
+  halt_exploration_prob: 0.1
+  forward_dtype: "float32"
+
+training:
+  batch_size: 64
+  max_epochs: 100
+  eval_interval_epochs: 5
+  learning_rate: 1.0e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  mixed_precision: bf16
+  lambda_G: 0.1
+  lambda_R: 0.1
+  lambda_P: 0.1
+  main_loss_weight: 1.0
+  halt_loss_weight: 0.1
+  drop_last: true
+
+data:
+  dataset_root: /tmp/marifah_full_dataset
+  num_workers: 4
+  pin_memory: true
+
+logging:
+  wandb_mode: online
+  wandb_project: marifah-core
+  log_interval_steps: 100
+  utilization_interval_steps: 500
+  checkpoint_dir: checkpoints/phase1/
+
+warm_start:
+  checkpoint: null        # set to checkpoints/phase0/best.pt for warm-start
+  load_optimizer: false

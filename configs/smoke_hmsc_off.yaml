@@ -1,0 +1,50 @@
+# Smoke test: HMSC disabled (Phase 0-shaped).
+# Verifies the no-HMSC path and regression invariant.
+
+experiment:
+  name: training_pipeline_smoke_hmsc_off
+  phase: 0
+  seed: 42
+
+model:
+  d_model: 64
+  num_heads: 4
+  H_cycles: 1
+  L_cycles: 1
+  H_layers: 1
+  L_layers: 1
+  use_hmsc: false
+  hmsc: null
+  vocab_size: 10
+  max_nodes: 64
+  halt_max_steps: 2
+  halt_exploration_prob: 0.0
+  forward_dtype: "float32"
+
+training:
+  batch_size: 8
+  max_epochs: 3
+  eval_interval_epochs: 1
+  learning_rate: 1.0e-4
+  warmup_steps: 5
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  mixed_precision: float32
+  lambda_G: 0.0
+  lambda_R: 0.0
+  lambda_P: 0.0
+  main_loss_weight: 1.0
+  halt_loss_weight: 0.1
+  drop_last: false
+
+data:
+  dataset_root: /tmp/marifah_tiny_dataset
+  num_workers: 0
+  pin_memory: false
+
+logging:
+  wandb_mode: disabled
+  wandb_project: marifah-core
+  log_interval_steps: 5
+  utilization_interval_steps: 10
+  checkpoint_dir: /tmp/marifah_smoke_checkpoints/smoke_hmsc_off/
