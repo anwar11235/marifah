@@ -211,3 +211,71 @@ checkpoints/
 - Graph adapter: wire `DagGenerator` output into a PyTorch Dataset + DataLoader for CORAL training. `seq_len` = max DAG node count (variable; pad to max).
 - Full dataset generation on Vast.ai (800K train takes ~14 min at 950 DAGs/sec single-threaded; use `--workers` to parallelize).
 - HMSC codebook session (Session 3+).
+
+---
+
+### Session 3 — 2026-05-15
+
+**Goal:** Implement graph adapter (data pipeline: parquet -> GraphBatch -> CORAL forward).
+
+**Exit criteria status:** All criteria met.
+
+**Modules implemented** (`src/marifah/data/adapter/`):
+
+| Module | Contents |
+|--------|----------|
+| `__init__.py` | Package marker |
+| `batch_format.py` | `GraphBatch` dataclass (node_features, attention_mask, node_mask, pos_encoding, label tensors); `primitive_ids` and `attr_vec` properties |
+| `tokenizer.py` | `encode_node_attrs()` for all 10 primitives; `NodeTokenizer` nn.Module; `NODE_FEAT_DIM=5`, `ATTR_DIM=4` |
+| `positional.py` | `compute_laplacian_pe()` (numpy); `laplacian_pe_tensor()` (torch); dense eigh <= 32 nodes, scipy eigsh otherwise; `K_PE_DEFAULT=8` |
+| `attention_mask.py` | `build_attention_mask()` additive bias (0.0 attend, -inf block); `pad_attention_masks()`; `AttentionDirection` literal |
+| `dataset.py` | `GraphDAGDataset` — loads shard_*.parquet, filters by max_nodes (with logging), precomputes PE + masks at init |
+| `collate.py` | `collate_graphs()` — pads to batch max-nodes, raises ValueError on empty batch (underfull-batch fix) |
+| `cli.py` | `precompute-pe` (adds PE column to shards); `inspect-batch` (prints tensor shapes and sample) |
+
+**New model file** (`src/marifah/models/`):
+
+| Module | Contents |
+|--------|----------|
+| `attention.py` | `sdpa_with_bias()`, `flash_varlen()` with CPU fallback, `GraphAttentionLayer` |
+
+**Tests** (all in `tests/`):
+
+| File | Count |
+|------|-------|
+| `test_adapter_tokenizer.py` | 7 tests |
+| `test_adapter_positional.py` | 7 tests |
+| `test_adapter_attention_mask.py` | 7 tests |
+| `test_adapter_attention_layer.py` | 8 tests |
+| `test_adapter_dataset.py` | 8 tests |
+| `test_adapter_collate.py` | 11 tests |
+| `test_adapter_e2e.py` | 5 tests |
+
+Total: 195/195 tests passing (includes all Session 1 + 2 tests).
+
+**Verification results:**
+1. ✅ 195/195 tests pass (`pytest tests/ -q`)
+2. ✅ `inspect-batch` — shapes confirmed: `(B=4, N_max=21, 5)` node_features, `(4, 21, 21)` attention_mask
+3. ✅ SDPA vs flash_varlen max abs diff: 0.0 (< 1e-2 fp16 tolerance; §4 item 3)
+4. ✅ 3-node chain attention mask verified: node 1 attends to node 0 only; node 2 attends to node 1 only (§4 item 5)
+5. ✅ Mixed 5-node + 15-node batch pads correctly; padding positions are -inf / 0 / -1 as required (§4 item 7)
+6. ✅ Empty-batch `collate_graphs([])` raises `ValueError("empty")` (underfull-batch fix, salvage §3)
+7. ✅ `precompute-pe` CLI adds `pos_encoding` JSON column to shard files
+8. ✅ End-to-end: `GraphDAGDataset -> collate_graphs -> TinyGraphModel -> loss -> backward` — gradients are non-None and finite
+9. ✅ `CoralInner` integration smoke test: output shape `(B, N, 10)`, all finite
+
+**Bug fixed during implementation:**
+- `GraphDAGDataset` node-count filter: `len(rec["nodes"])` measured JSON string length (always >> 512), filtering all records. Fixed to `int(rec.get("num_nodes", 0))` with JSON-parse fallback.
+
+**Key architectural decisions:**
+- Additive-bias mask convention: 0.0 = attend, -inf = block. Matches CORAL-v3 arc/padding-attention-mask salvage (commit c7e784d).
+- Directed mask: node `dst` attends to `src` iff `src -> dst` is a DAG edge. Self-loops always 0.0.
+- Laplacian PE is computed on undirected version of graph (symmetric L = D - A).
+- `collate_graphs` pads to max-nodes-in-batch (not dataset max); `DataLoader` controls underfull batches via `drop_last`.
+- `NodeTokenizer` sums primitive embedding + attr projection (not concat) to keep d_model fixed.
+
+**Open items for Session 4:**
+- HMSC codebook session: replace `SpatialMoECodebook` scaffold with real Marifah mechanism.
+- Full dataset generation on Vast.ai (800K train DAGs).
+- Wire graph adapter into main training loop (`train.py`) with graph-specific `seq_len = max_nodes`.
+- W&B workspace migration from `aktuator-ai`.
