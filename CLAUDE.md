@@ -50,10 +50,19 @@ src/marifah/
       auxiliary_heads.py   GlobalAuxHead, RegionalAuxHead, PerPositionAuxHead, compute_aux_losses
       hmsc.py              HMSC top-level module
   training/
-    losses.py        ACTLossHead, CoralV3LossHead, stablemax_cross_entropy
+    losses.py        ACTLossHead, CoralV3LossHead, stablemax_cross_entropy (Session 1)
     scheduler.py     cosine_schedule_with_warmup_lr_lambda
     adam_atan2.py    Pure-PyTorch AdamATan2 fallback
-    train.py         Full training loop (Hydra entry point)
+    train.py         Sudoku training loop (Hydra entry point, Session 1)
+    config.py        TrainingConfig Pydantic hierarchy (Session 5)
+    graph_losses.py  compute_total_loss for graph DAG (Session 5)
+    graph_utils.py   derive_region_labels, prepare_batch_for_model (Session 5)
+    data_pipeline.py build_data_loaders, collate_graphs_padded (Session 5)
+    checkpointing.py save_checkpoint, load_checkpoint (Session 5)
+    logging.py       TrainingLogger — W&B + JSONL (Session 5)
+    eval_loop.py     evaluate() for graph val split (Session 5)
+    trainer.py       build_model, Trainer class (Session 5)
+    cli.py           train / eval / smoke CLI (Session 5)
   data/
     base_dataset.py  PuzzleDataset, create_dataloader (HRM-format)
 checkpoints/
@@ -337,3 +346,72 @@ Total: 195/195 tests passing (includes all Session 1 + 2 tests).
 - `region_labels` mapping: generator produces per-node labels; R-head expects per-region — needs mapping logic
 - Full dataset generation on Vast.ai (800K train DAGs)
 - W&B workspace migration from `aktuator-ai`
+
+---
+
+### Session 5 — 2026-05-15
+
+**Goal:** Wire the adapter + HMSC + CORAL into a complete training pipeline with checkpointing, W&B logging, configurable lambdas, and Phase 0 / Phase 1 launch configurations. Verify end-to-end via tiny-dataset training smoke tests.
+
+**Exit criteria status:** All criteria met.
+
+**Modules implemented** (`src/marifah/training/`):
+
+| Module | Contents |
+|--------|----------|
+| `config.py` | `TrainingConfig` Pydantic hierarchy (Experiment/Model/HMSC/Training/Data/Logging/WarmStart subconfigs), `load_config()` |
+| `graph_losses.py` | `compute_total_loss()` — main CE + halt BCE + HMSC aux losses (pre-weighted via HMSC lambdas set at init) |
+| `graph_utils.py` | `derive_region_labels()` (per-node → per-region majority-vote), `prepare_batch_for_model()` (GraphBatch → CoralV3Inner dict) |
+| `data_pipeline.py` | `collate_graphs_padded()` (fixed-length padding), `build_data_loaders()` for all 5 splits |
+| `checkpointing.py` | `save_checkpoint()` (atomic write), `load_checkpoint()`, `load_warmstart()` |
+| `logging.py` | `TrainingLogger` — W&B + always-on JSONL fallback, step/eval/codebook_stats emitters |
+| `eval_loop.py` | `evaluate()` — full val pass in eval mode, aggregated metrics |
+| `trainer.py` | `build_model()`, `Trainer` class (epoch-based, 1-step gradient, fresh carry per batch) |
+| `cli.py` | `train` / `eval` / `smoke` subcommands; smoke auto-generates tiny dataset |
+
+**Config files implemented** (`configs/`):
+
+| File | Contents |
+|------|----------|
+| `phase0.yaml` | PC-only, use_hmsc=false, d_model=512, all lambdas=0 |
+| `phase1.yaml` | HMSC engaged, λ_G=λ_R=λ_P=0.1, K_G=64/K_R=16/K_P=16 |
+| `smoke.yaml` | d_model=64, 3 epochs, HMSC on, wandb disabled |
+| `smoke_hmsc_off.yaml` | Same as smoke, HMSC off |
+
+**Verification results:**
+1. ✅ `pytest tests/` — 280/280 passed (includes 25 new training tests)
+2. ✅ Smoke A (HMSC off) — 3 epochs, loss 1.68→0.08, checkpoint saved + reloaded
+3. ✅ Smoke B (HMSC on) — 3 epochs, main 1.69→0.11, aux 0.85→0.71 (decreasing), HMSC util stats in log
+4. ✅ Checkpoints load into fresh model instances
+5. ✅ Regression check: `use_hmsc=False` max_diff = 0.0
+6. ✅ Loss values real (main non-zero, decreasing over epochs)
+7. ✅ HMSC codebook utilisation stats in Smoke B JSONL log
+8. ✅ Aux=0 in Smoke A, aux>0 in Smoke B
+9. ✅ `wandb_mode: disabled` works without W&B connectivity
+10. ✅ JSONL log written and parseable for both smokes
+11. ✅ CLI `train`, `eval`, `smoke` all execute end-to-end
+12. ✅ Branch `session-5/training-pipeline` committed (after this entry)
+
+**Key architectural decisions:**
+- **1-step gradient training**: Fresh carry per batch, single CORAL inner segment. Full ACT multi-step is test-time; training uses single segment for simplicity.
+- **HMSC attached post-init**: `CoralV3Inner` built with `use_hmsc=False`, then `model.hmsc = HMSC(...)` added with correct params and training lambdas. Avoids CoralConfig needing HMSC-specific fields.
+- **eval_interval in EPOCHS**: Enforced by design — `eval_interval_epochs` in config, loop counts epochs.
+- **region_labels heuristic**: `pattern_id % num_regions` majority-vote mapping. Pipeline-plumbing approximation; may need refinement for production.
+- **HMSC lambdas set at model-build time** from training config, not as separate config section. Keeps aux loss weighting co-located with the model.
+
+**Smoke test summary:**
+| Metric | Smoke A (HMSC off) | Smoke B (HMSC on) |
+|--------|--------------------|-------------------|
+| Epoch 0 main loss | 1.681 | 1.686 |
+| Epoch 2 main loss | 0.077 | 0.110 |
+| Epoch 2 val acc_node | 0.824 | 0.824 |
+| Aux loss epoch 0 | 0.000 | 0.853 |
+| Aux loss epoch 2 | 0.000 | 0.710 |
+| Regression max_diff | 0.0 | — |
+
+**Open items for Session 6:**
+- Phase 0 training launch on Vast.ai A100 SXM4 80GB
+- Full dataset generation (800K train DAGs; ~14 min single-threaded)
+- Update `configs/phase0.yaml` `data.dataset_root` to Vast.ai path
+- Verify GPU memory at batch_size=64, d_model=512, H_layers=2
+- Workflow-type AUC probe after Phase 0 checkpoint (§7 decision gate)
