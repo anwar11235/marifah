@@ -478,6 +478,29 @@ Checkpoint dtype audit: `load_warmstart` → `strict=False` `load_state_dict` �
 
 Note: `mixed_precision` config key is never consumed (no `torch.autocast` in trainer). bf16 is achieved entirely through the Casted layers pattern (`forward_dtype`). `mixed_precision` is dead config — flagged, not fixed.
 
+**Bug fix (2026-05-16): architecture mismatch — warmstart/phase0 configs had H_layers=2, L_layers=2**
+
+Sudoku Phase 3c checkpoint (warm-start source) has H_layers=4, L_layers=4, d_model=512 (~30.4M params).
+Warmstart and phase0 configs had H_layers=2, L_layers=2 (~15.2M params) — set conservatively in Session 5 with no GPU available.
+This caused `load_state_dict(strict=False)` to silently drop checkpoint layers 2-3, making warm-vs-cold meaningless.
+
+Changes:
+- `configs/warmstart_cold.yaml`: H_layers 2→4, L_layers 2→4
+- `configs/warmstart_warm.yaml`: H_layers 2→4, L_layers 2→4
+- `configs/phase0.yaml`: H_layers 2→4, L_layers 2→4
+
+New test file `tests/test_configs.py` (2 tests, 294 total pass):
+- `test_warmstart_configs_match_sudoku_checkpoint_architecture`: asserts H/L/d_model match Sudoku Phase 3c constants
+- `test_warmstart_cold_and_warm_have_identical_model_architecture`: asserts cold/warm model sections are bit-identical
+
+Audit findings (not patched — flagged for review):
+
+1. **load_state_dict silent truncation** (`checkpointing.py:95,98`): `load_state_dict(..., strict=False)` discards the `_IncompatibleKeys` return value. Missing/unexpected keys produce no log warning. This is the exact mechanism that allowed the 2-vs-4-layer mismatch to go unnoticed. Proposed fix (separate PR): capture return and emit `logger.warning` for any non-empty `missing_keys` or `unexpected_keys`.
+
+2. **vocab_size=10** (`warmstart_cold/warm.yaml`, `phase0.yaml`): 10 primitive types (IntEnum 0–9), so graph task uses indices 0–9. `vocab_size=10` is correct for the graph model. The Sudoku checkpoint's lm_head has shape `(11, 512)` (11-class Sudoku vocab) vs. graph model `(10, 512)`. Under `strict=False`, same-key shape mismatches still raise `RuntimeError`; needs checkpoint key-name inspection on Vast to confirm whether the lm_head key is present in the Sudoku checkpoint. Cannot verify locally without the full checkpoint dump.
+
+3. **max_nodes=100** (`warmstart_cold/warm.yaml`, `phase0.yaml`): Largest single pattern has `max_size=18`; complex workflows have up to 8 patterns → theoretical max ~145 nodes. `GraphDAGDataset` silently filters records with `num_nodes > max_nodes`, so complex DAGs >100 nodes are dropped from training. `test_ood_size` split DAGs scale 2–5× training max in size — if empirical training cap is ~100 nodes, OOD-size DAGs (200–500 nodes) will be entirely filtered, making that eval split empty. Verify empirical size distribution before phase 0 launch; consider raising max_nodes or confirming OOD size split is not used in Phase 0 eval.
+
 **Open items for Session 7:**
 - Phase 0 main launch (same instance, same runbook pattern as warm-start comparison)
 - Early checkpoint probe at ~5K steps (codebook §8.2: AUC < 0.3 → stop)

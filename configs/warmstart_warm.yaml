@@ -13,8 +13,8 @@ model:
   num_heads: 8
   H_cycles: 1
   L_cycles: 1
-  H_layers: 2
-  L_layers: 2
+  H_layers: 4   # match Sudoku Phase 3c canonical (4 H + 4 L)
+  L_layers: 4   # match Sudoku Phase 3c canonical
   use_hmsc: false
   hmsc: null
   vocab_size: 10
