@@ -54,6 +54,9 @@ logging:
 
 # Reset optimizer — fresh learning dynamics, not Sudoku optimization trajectory.
 # Actual checkpoint file: phase3c_canonical_seed0_best.pt (see checkpoints/sudoku-phase3c/).
+# remap: strip model.inner. prefix and _orig_mod. torch.compile artifacts from Sudoku keys,
+#         filter vocab_size=11 embed/lm_head (shape mismatch vs marifah vocab_size=10).
 warm_start:
   checkpoint: checkpoints/sudoku-phase3c/phase3c_canonical_seed0_best.pt
   load_optimizer: false
+  remap: sudoku_to_marifah

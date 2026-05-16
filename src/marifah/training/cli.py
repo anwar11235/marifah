@@ -107,7 +107,10 @@ def cmd_train(args: argparse.Namespace) -> None:
         if config.warm_start.load_optimizer:
             trainer.resume(config.warm_start.checkpoint)
         else:
-            trainer.warmstart(config.warm_start.checkpoint)
+            trainer.warmstart(
+                config.warm_start.checkpoint,
+                remap=config.warm_start.remap,
+            )
 
     trainer.train()
 

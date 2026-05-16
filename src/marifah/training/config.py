@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel
@@ -78,11 +78,13 @@ class LoggingConfig(BaseModel):
     log_interval_steps: int = 100
     utilization_interval_steps: int = 500
     checkpoint_dir: str = "checkpoints/"
+    heartbeat_interval_steps: int = 10   # non-TTY heartbeat; 0 to disable
 
 
 class WarmStartConfig(BaseModel):
     checkpoint: Optional[str] = None
     load_optimizer: bool = False
+    remap: Optional[Literal["sudoku_to_marifah"]] = None   # key remap strategy
 
 
 class TrainingConfig(BaseModel):
