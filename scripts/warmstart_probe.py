@@ -130,31 +130,59 @@ def compute_workflow_type_auc(
 ) -> Dict[str, float]:
     """Train a linear probe on carry states; report multi-class OvR AUC.
 
-    Uses sklearn LogisticRegression for the probe (fast, well-calibrated).
-    Falls back to a simple nearest-centroid classifier if sklearn unavailable.
+    Uses sklearn LogisticRegression with a stratified train/test split.
+    AUC failure raises RuntimeError — no silent fallback to accuracy.
 
     Returns dict with:
-        auc        — macro-averaged OvR AUC (the gating metric per §7.1)
-        accuracy   — probe accuracy on held-out test set
-        n_classes  — number of distinct workflow types seen
-        n_train    — training set size
-        n_test     — test set size
+        auc                             — macro-averaged OvR AUC (gating metric §7.1)
+        accuracy                        — probe accuracy on held-out test set
+        n_classes                       — distinct classes present in test set
+        n_classes_present_in_test       — same (alias for clarity in reports)
+        n_classes_filtered_single_sample — classes dropped for having only 1 sample
+        n_train                         — training set size
+        n_test                          — test set size
     """
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import roc_auc_score
 
-    rng = np.random.RandomState(seed)
-    n = len(labels)
-    test_size = max(1, int(n * test_fraction))
-    train_size = n - test_size
+    unique_classes, class_counts = np.unique(labels, return_counts=True)
 
-    idx = rng.permutation(n)
-    train_idx, test_idx = idx[:train_size], idx[train_size:]
+    # Stratification requires >= 2 samples per class; filter singletons first.
+    if class_counts.min() < 2:
+        n_single = int((class_counts < 2).sum())
+        logger.warning(
+            "Stratified split impossible: %d class(es) have only 1 sample. "
+            "Filtering them out. AUC computed on remaining classes only.",
+            n_single,
+        )
+        valid_classes = unique_classes[class_counts >= 2]
+        valid_mask = np.isin(labels, valid_classes)
+        if valid_mask.sum() < 10:
+            raise RuntimeError(
+                f"Too few samples after filtering single-instance classes: {valid_mask.sum()}"
+            )
+        labels_filtered = labels[valid_mask]
+        carry_states_filtered = carry_states[valid_mask]
+        logger.info(
+            "Filtered to %d valid samples across %d classes (was %d / %d).",
+            valid_mask.sum(), len(valid_classes), len(labels), len(unique_classes),
+        )
+        n_classes_filtered = n_single
+    else:
+        labels_filtered = labels
+        carry_states_filtered = carry_states
+        n_classes_filtered = 0
 
-    X_train, X_test = carry_states[train_idx], carry_states[test_idx]
-    y_train, y_test = labels[train_idx], labels[test_idx]
+    X_train, X_test, y_train, y_test = train_test_split(
+        carry_states_filtered, labels_filtered,
+        test_size=test_fraction,
+        random_state=seed,
+        stratify=labels_filtered,
+    )
+    n_train = len(y_train)
+    n_test = len(y_test)
 
     scaler = StandardScaler()
     X_train_s = scaler.fit_transform(X_train)
@@ -163,40 +191,95 @@ def compute_workflow_type_auc(
     clf = LogisticRegression(max_iter=500, C=1.0, random_state=seed)
     clf.fit(X_train_s, y_train)
 
+    assert clf.classes_.shape[0] >= 2, (
+        f"Classifier trained on only {clf.classes_.shape[0]} class(es) — AUC undefined."
+    )
+
     y_prob = clf.predict_proba(X_test_s)
     y_pred = clf.predict(X_test_s)
 
-    classes = clf.classes_
-    n_unique_in_test = len(np.unique(y_test))
+    classes_in_test = np.unique(y_test)
+    n_unique_in_test = len(classes_in_test)
 
-    # Multi-class OvR AUC; fall back to accuracy if only 1 class in test set.
-    auc: float
     if n_unique_in_test < 2:
-        logger.warning("Only %d class(es) in y_test — AUC set to 0.5 (uninformative).", n_unique_in_test)
-        auc = 0.5
-    else:
-        try:
-            auc = float(roc_auc_score(y_test, y_prob, multi_class="ovr", average="macro",
-                                      labels=classes))
-            if np.isnan(auc):
-                raise ValueError("roc_auc_score returned NaN")
-        except (ValueError, Exception) as exc:
-            logger.warning("roc_auc_score failed (%s) — using accuracy as fallback.", exc)
-            auc = float((y_pred == y_test).mean())
+        raise RuntimeError(
+            f"Only {n_unique_in_test} class(es) in y_test after stratified split. "
+            f"AUC undefined. Check label distribution."
+        )
+
+    # Restrict probabilities to classes present in test to avoid OvR NaN.
+    class_mask = np.isin(clf.classes_, classes_in_test)
+    y_prob_restricted = y_prob[:, class_mask]
+    classes_restricted = clf.classes_[class_mask]
+
+    try:
+        auc = float(roc_auc_score(
+            y_test, y_prob_restricted,
+            multi_class="ovr",
+            average="macro",
+            labels=classes_restricted,
+        ))
+        if np.isnan(auc):
+            raise RuntimeError("roc_auc_score returned NaN even with stratified split")
+    except ValueError as exc:
+        raise RuntimeError(f"AUC computation failed: {exc}") from exc
 
     accuracy = float((y_pred == y_test).mean())
 
-    n_classes = len(classes)
     logger.info(
         "Workflow-type AUC=%.4f  accuracy=%.4f  classes=%d  n_train=%d  n_test=%d",
-        auc, accuracy, n_classes, train_size, test_size,
+        auc, accuracy, n_unique_in_test, n_train, n_test,
     )
     return {
         "auc": auc,
         "accuracy": accuracy,
-        "n_classes": int(n_classes),
-        "n_train": int(train_size),
-        "n_test": int(test_size),
+        "n_classes": int(n_unique_in_test),
+        "n_classes_present_in_test": int(n_unique_in_test),
+        "n_classes_filtered_single_sample": n_classes_filtered,
+        "n_train": int(n_train),
+        "n_test": int(n_test),
+    }
+
+
+def _bootstrap_auc(
+    carry_states: np.ndarray,
+    labels: np.ndarray,
+    n_bootstrap: int = 100,
+    base_seed: int = 0,
+) -> Optional[Dict[str, float]]:
+    """Bootstrap AUC by resampling carry/label pairs with replacement.
+
+    Returns dict with mean, std, ci_low, ci_high at 95% CI, plus n_successful.
+    Returns None if fewer than 10 bootstrap iterations succeeded.
+
+    Note: carry_states and labels must already be extracted — this function
+    does NOT re-run model inference.
+    """
+    rng = np.random.RandomState(base_seed)
+    n = len(labels)
+    aucs: List[float] = []
+    for i in range(n_bootstrap):
+        idx = rng.choice(n, size=n, replace=True)
+        try:
+            result = compute_workflow_type_auc(
+                carry_states[idx], labels[idx],
+                test_fraction=0.3, seed=base_seed + i,
+            )
+            aucs.append(result["auc"])
+        except (RuntimeError, ValueError):
+            continue
+    if len(aucs) < 10:
+        logger.warning(
+            "Bootstrap: only %d/%d iterations succeeded — returning None.", len(aucs), n_bootstrap
+        )
+        return None
+    aucs_arr = np.array(aucs)
+    return {
+        "mean": float(aucs_arr.mean()),
+        "std": float(aucs_arr.std()),
+        "ci_low": float(np.percentile(aucs_arr, 2.5)),
+        "ci_high": float(np.percentile(aucs_arr, 97.5)),
+        "n_successful": len(aucs),
     }
 
 
@@ -322,6 +405,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", required=True, help="Output JSON path for probe results")
     p.add_argument("--max_samples", type=int, default=1000,
                    help="Max DAGs to evaluate (default: 1000 for speed)")
+    p.add_argument("--bootstrap", type=int, default=0,
+                   help="Bootstrap iterations for 95%% CI on AUC (0 = skip, default: 0)")
     p.add_argument("--device", default="cpu", help="Device: cpu or cuda")
     return p.parse_args()
 
@@ -363,11 +448,38 @@ def main() -> None:
     carry_states, labels = _extract_carry_states(
         model, loader, config, device, args.max_samples
     )
-    logger.info("Carry states: shape=%s  n_unique_labels=%d", carry_states.shape, len(set(labels)))
+    n_extracted = carry_states.shape[0]
+    if n_extracted < args.max_samples:
+        logger.info(
+            "Carry states: shape=%s  n_unique_labels=%d  "
+            "(extracted %d < max_samples=%d — dataset smaller than requested)",
+            carry_states.shape, len(set(labels)), n_extracted, args.max_samples,
+        )
+    else:
+        logger.info("Carry states: shape=%s  n_unique_labels=%d",
+                    carry_states.shape, len(set(labels)))
+    assert carry_states.shape[0] == len(labels), (
+        f"carry_states rows ({carry_states.shape[0]}) != labels length ({len(labels)})"
+    )
 
     # ---- Workflow-type AUC ------------------------------------------------
     logger.info("Computing workflow-type AUC ...")
     auc_results = compute_workflow_type_auc(carry_states, labels)
+
+    # ---- Bootstrap CI (optional) ------------------------------------------
+    bootstrap_results = None
+    if args.bootstrap > 0:
+        logger.info("Computing bootstrap AUC CI (%d iterations) ...", args.bootstrap)
+        bootstrap_results = _bootstrap_auc(carry_states, labels, n_bootstrap=args.bootstrap)
+        if bootstrap_results is not None:
+            logger.info(
+                "Bootstrap AUC: mean=%.4f  std=%.4f  95%% CI=[%.4f, %.4f]  n_ok=%d",
+                bootstrap_results["mean"], bootstrap_results["std"],
+                bootstrap_results["ci_low"], bootstrap_results["ci_high"],
+                bootstrap_results["n_successful"],
+            )
+        else:
+            logger.warning("Bootstrap returned None — too few successful iterations.")
 
     # ---- Execution faithfulness -------------------------------------------
     logger.info("Computing execution faithfulness ...")
@@ -385,10 +497,13 @@ def main() -> None:
         "split": args.split,
         "config": str(args.config),
         "max_samples": args.max_samples,
+        "n_extracted": n_extracted,
         "device": args.device,
         "workflow_type_auc": auc_results,
         "execution_faithfulness": faithfulness_results,
     }
+    if bootstrap_results is not None:
+        results["workflow_type_auc_bootstrap"] = bootstrap_results
 
     # Decision summary per OD7 criteria (pre-registered in §2.6)
     auc = auc_results["auc"]
@@ -396,6 +511,8 @@ def main() -> None:
     results["decision_inputs"] = {
         "workflow_type_auc": auc,
         "mean_edit_distance": mean_ed,
+        "n_classes_in_probe": auc_results["n_classes_present_in_test"],
+        "n_classes_filtered": auc_results["n_classes_filtered_single_sample"],
         "note": (
             "AUC >= 0.6 + mean_edit_distance <= 0.1 → warm-start preferable. "
             "See session-06-warmstart-verdict.md for full decision table."
@@ -408,7 +525,12 @@ def main() -> None:
 
     logger.info("Results written to %s", args.output)
     logger.info("=== SUMMARY ===")
-    logger.info("  workflow_type_auc : %.4f", auc)
+    logger.info("  workflow_type_auc : %.4f  (classes in test=%d, filtered=%d)",
+                auc, auc_results["n_classes_present_in_test"],
+                auc_results["n_classes_filtered_single_sample"])
+    if bootstrap_results is not None:
+        logger.info("  auc 95%% CI      : [%.4f, %.4f]",
+                    bootstrap_results["ci_low"], bootstrap_results["ci_high"])
     logger.info("  mean_edit_distance: %.4f", mean_ed)
     logger.info("  failure_rate      : %.4f", faithfulness_results["failure_rate"])
 

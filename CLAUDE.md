@@ -574,8 +574,37 @@ New files: `tests/test_checkpointing.py` (10 tests), 1 new test in `tests/test_a
 
 **Test count: 308/308 (was 305 before this work)**
 
+**Probe AUC fix (2026-05-16): stratified split + no silent accuracy fallback**
+
+*Context:* Cold warmstart probe (W&B `w3sn79z5`) reported "AUC=0.9933" but this was actually accuracy — `roc_auc_score` returned NaN from the random 70/30 split leaving some of 37 workflow classes with zero presence in y_test.
+
+**Root cause:** `compute_workflow_type_auc` used `rng.permutation` (random split) → rare classes ended up entirely in train → OvR AUC NaN → silent fallback to accuracy.
+
+**Changes in `scripts/warmstart_probe.py`:**
+- Replaced `rng.permutation` split with `sklearn.train_test_split(stratify=labels_filtered)` — guarantees every class appears in both train and test
+- Pre-filters classes with only 1 sample (can't stratify) with explicit WARNING + count logged
+- Removed silent `except ... → accuracy` fallback — AUC failure now raises `RuntimeError`
+- Restricts `roc_auc_score` to classes present in y_test (avoids per-class NaN from train-only classes)
+- Added `_bootstrap_auc()` — resamples carry_states/labels (NOT model inference) 100× to compute 95% CI; catches both `RuntimeError` and `ValueError` from sklearn
+- Added `--bootstrap N` CLI flag (default 0 = skip)
+- Added carry-state sanity assertion and honest summary logging (classes_in_test, classes_filtered)
+- Result dict extended: `n_classes_present_in_test`, `n_classes_filtered_single_sample`
+
+**New test file:** `tests/test_warmstart_probe.py` (9 tests):
+- `test_stratified_split_returns_finite_auc_on_skewed_37_class` — the exact failure case, now passes
+- `test_single_instance_classes_are_filtered_with_warning` — caplog asserts warning emitted
+- `test_raises_when_too_few_samples_after_filtering` — RuntimeError on extreme imbalance
+- `test_does_not_return_accuracy_when_auc_is_unavailable` — old fallback path is gone
+- `test_bootstrap_returns_valid_ci` — ci_low <= mean <= ci_high, all in [0,1]
+- `test_bootstrap_returns_none_when_too_few_succeed` — threshold enforced
+- `test_bootstrap_does_not_rerun_model_inference` — signature check (no model arg)
+- Plus 2 structural tests
+
+**Test count: 317/317 (was 308 before this work)**
+
 **Open items for Session 7:**
 - Phase 0 main launch (same instance, same runbook pattern as warm-start comparison)
+- Re-run cold probe on existing checkpoint with updated script (`git pull` first)
 - Early checkpoint probe at ~5K steps (codebook §8.2: AUC < 0.3 → stop)
 - Midpoint probe at ~20K steps
 - Final probe at ~50K+ steps (§7 decision gate: Path A/B/C)
