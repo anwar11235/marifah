@@ -1,6 +1,6 @@
 """End-to-end pipeline verification script for use on Vast.ai before Phase 0 launch.
 
-Runs four phases in under 5 minutes on an A100 SXM4 80GB and emits a single
+Runs five phases in under 8 minutes on an A100 SXM4 80GB and emits a single
 PASS/FAIL summary.  Do NOT run locally (no GPU, no full dataset).
 
 Usage:
@@ -13,7 +13,8 @@ Usage:
 Phases:
   1. Minimal training   — 4 steps, batch_size=4, smoke check forward+backward
   2. Eval pass          — one val pass on the trained checkpoint
-  3. Probe pass         — carry-state extraction + faithfulness on ≤16 samples
+  3a. Delta-probe       — AUC(z_H) - AUC(node_features) on <=16 samples
+  3b. Shuffled-probe    — AUC with shuffled primitives within each DAG on <=16 samples
   4. Summary            — PASS/FAIL table printed and optionally written to JSON
 """
 
@@ -140,15 +141,14 @@ def _phase2_eval(
     }
 
 
-def _phase3_probe(
+def _phase3a_delta_probe(
     config_path: str,
     dataset_root: str,
     checkpoint: str,
     device: torch.device,
     max_samples: int = 16,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Run carry extraction + faithfulness probe; return (status, results)."""
-    import sys, os
+    """Δ-probe: AUC(z_H) - AUC(node_features). Verifies substrate adds info beyond inputs."""
     scripts_dir = str(Path(__file__).parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
@@ -157,7 +157,7 @@ def _phase3_probe(
     from marifah.training.trainer import build_model
     from marifah.training.checkpointing import load_checkpoint
     from marifah.training.data_pipeline import build_data_loaders
-    from warmstart_probe import _extract_carry_states, compute_execution_faithfulness
+    from delta_probe import _extract_features_and_labels, _probe_auc
 
     cfg = load_config(config_path)
     cfg.data.dataset_root = dataset_root
@@ -174,30 +174,94 @@ def _phase3_probe(
         return _FAIL, {"error": "val split not found"}
 
     t0 = time.perf_counter()
-
-    carry_states, labels = _extract_carry_states(model, val_loader, cfg, device, max_samples)
-
-    # Reload val loader for faithfulness (carry extraction consumed it)
-    loaders2 = build_data_loaders(cfg)
-    faithfulness = compute_execution_faithfulness(
-        model, loaders2["val"], cfg, device, max_samples
+    node_feats, z_H, labels = _extract_features_and_labels(
+        model, val_loader, cfg, device, max_samples
     )
     elapsed = time.perf_counter() - t0
 
-    # Sanity: carry states must be finite
     import numpy as np
-    if not np.isfinite(carry_states).all():
-        return _FAIL, {"error": "carry_states contain non-finite values", "elapsed_s": elapsed}
+    if not np.isfinite(z_H).all():
+        return _FAIL, {"error": "z_H contains non-finite values", "elapsed_s": elapsed}
 
-    mean_ed = faithfulness.get("mean_edit_distance", float("nan"))
-    logger.info("Phase 3 done: %.2fs  n=%d  mean_edit_dist=%.4f",
-                elapsed, faithfulness.get("n_samples", 0), mean_ed)
+    try:
+        res_baseline = _probe_auc(node_feats, labels)
+        res_substrate = _probe_auc(z_H, labels)
+        delta = res_substrate["auc"] - res_baseline["auc"]
+    except (RuntimeError, ValueError) as exc:
+        return _FAIL, {"error": f"Probe failed: {exc}", "elapsed_s": elapsed}
+
+    logger.info("Phase 3a done: %.2fs  delta=%.4f  (baseline=%.4f  substrate=%.4f)",
+                elapsed, delta, res_baseline["auc"], res_substrate["auc"])
     return _PASS, {
         "elapsed_s": round(elapsed, 2),
-        "carry_shape": list(carry_states.shape),
-        "n_labels": int(len(labels)),
-        "mean_edit_distance": round(float(mean_ed), 6) if mean_ed == mean_ed else None,
-        "failure_rate": round(faithfulness.get("failure_rate", 0.0), 6),
+        "auc_baseline": round(res_baseline["auc"], 4),
+        "auc_substrate": round(res_substrate["auc"], 4),
+        "delta": round(delta, 4),
+        "n_samples": len(labels),
+    }
+
+
+def _phase3b_shuffled_probe(
+    config_path: str,
+    dataset_root: str,
+    checkpoint: str,
+    device: torch.device,
+    max_samples: int = 16,
+) -> Tuple[str, Dict[str, Any]]:
+    """Shuffled-primitive probe: verifies substrate uses graph structure, not just primitive identity."""
+    scripts_dir = str(Path(__file__).parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+
+    from marifah.training.config import load_config
+    from marifah.training.trainer import build_model
+    from marifah.training.checkpointing import load_checkpoint
+    from marifah.training.data_pipeline import build_data_loaders
+    from shuffled_probe import _extract_z_H_pooled
+    from warmstart_probe import compute_workflow_type_auc
+
+    cfg = load_config(config_path)
+    cfg.data.dataset_root = dataset_root
+    cfg.training.batch_size = 4
+    cfg.logging.wandb_mode = "disabled"
+
+    model = build_model(cfg, device)
+    load_checkpoint(checkpoint, model)
+    model.eval()
+
+    t0 = time.perf_counter()
+
+    loaders = build_data_loaders(cfg)
+    loader1 = loaders.get("val")
+    if loader1 is None:
+        return _FAIL, {"error": "val split not found"}
+
+    z_H_normal, labels_normal = _extract_z_H_pooled(
+        model, loader1, cfg, device, max_samples, shuffle_primitives=False
+    )
+
+    loaders2 = build_data_loaders(cfg)
+    loader2 = loaders2.get("val")
+    z_H_shuffled, labels_shuffled = _extract_z_H_pooled(
+        model, loader2, cfg, device, max_samples, shuffle_primitives=True, shuffle_seed=42
+    )
+    elapsed = time.perf_counter() - t0
+
+    try:
+        res_normal = compute_workflow_type_auc(z_H_normal, labels_normal)
+        res_shuffled = compute_workflow_type_auc(z_H_shuffled, labels_shuffled)
+    except (RuntimeError, ValueError) as exc:
+        return _FAIL, {"error": f"Probe failed: {exc}", "elapsed_s": elapsed}
+
+    auc_drop = res_normal["auc"] - res_shuffled["auc"]
+    logger.info("Phase 3b done: %.2fs  auc_shuffled=%.4f  auc_drop=%.4f",
+                elapsed, res_shuffled["auc"], auc_drop)
+    return _PASS, {
+        "elapsed_s": round(elapsed, 2),
+        "auc_unshuffled": round(res_normal["auc"], 4),
+        "auc_shuffled": round(res_shuffled["auc"], 4),
+        "auc_drop": round(auc_drop, 4),
+        "n_samples": len(labels_normal),
     }
 
 
@@ -213,8 +277,8 @@ def _print_summary(results: Dict[str, Dict[str, Any]]) -> bool:
     print("=" * 60)
     all_pass = True
     for phase, (status, info) in results.items():
-        mark = "✓" if status == _PASS else "✗"
-        print(f"  {mark} {phase:30s}  {status}")
+        mark = "PASS" if status == _PASS else "FAIL"
+        print(f"  [{mark}] {phase:30s}")
         if status != _PASS:
             all_pass = False
             print(f"      error: {info.get('error', '?')}")
@@ -256,13 +320,21 @@ def main() -> None:
             status2, info2 = _FAIL, {"error": "skipped — Phase 1 failed"}
         results["Phase 2: eval pass"] = (status2, info2)
 
-        # Phase 3 — only if Phase 1 produced a checkpoint
-        logger.info("=== Phase 3: Probe pass ===")
+        # Phase 3a — delta-probe (only if Phase 1 produced a checkpoint)
+        logger.info("=== Phase 3a: Delta-probe ===")
         if status1 == _PASS and checkpoint:
-            status3, info3 = _phase3_probe(args.config, args.dataset, checkpoint, device)
+            status3a, info3a = _phase3a_delta_probe(args.config, args.dataset, checkpoint, device)
         else:
-            status3, info3 = _FAIL, {"error": "skipped — Phase 1 failed"}
-        results["Phase 3: probe (n=16)"] = (status3, info3)
+            status3a, info3a = _FAIL, {"error": "skipped — Phase 1 failed"}
+        results["Phase 3a: delta-probe (n=16)"] = (status3a, info3a)
+
+        # Phase 3b — shuffled-primitive probe (only if Phase 1 produced a checkpoint)
+        logger.info("=== Phase 3b: Shuffled-primitive probe ===")
+        if status1 == _PASS and checkpoint:
+            status3b, info3b = _phase3b_shuffled_probe(args.config, args.dataset, checkpoint, device)
+        else:
+            status3b, info3b = _FAIL, {"error": "skipped — Phase 1 failed"}
+        results["Phase 3b: shuffled-probe (n=16)"] = (status3b, info3b)
 
     # Phase 4: summary
     all_pass = _print_summary(results)
