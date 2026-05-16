@@ -537,8 +537,46 @@ The real Sudoku Phase 3c checkpoint loaded successfully via remap (test 5 PASSED
 **Test count: 305/305 (was 294 before this work)**
 New files: `tests/test_checkpointing.py` (10 tests), 1 new test in `tests/test_adapter_dataset.py`
 
+**Carry-dtype audit (2026-05-16): propagate forward_dtype to all carry constructions**
+
+*Context:* Round 1 (c92cfcb) fixed `trainer.step` and `build_model`. This round fixes the remaining sites and adds the `InnerCarry.zeros` factory as single source of truth.
+
+**Bug class:** Carry tensors hardcoded `dtype=torch.float32` instead of reading `config.model.forward_dtype`. On GPU with `forward_dtype=bfloat16`, fp32 carry flows into flash_attn_func → `RuntimeError: FlashAttention only supports fp16 and bf16`.
+
+**Sites fixed:**
+
+| Site | File | Change |
+|------|------|--------|
+| `eval_loop.evaluate` | `src/marifah/training/eval_loop.py` | Replaced `InnerCarry(z_H=torch.zeros(..., dtype=torch.float32, ...))` with `InnerCarry.zeros(B, config.model, device)` |
+| `warmstart_probe._extract_carry_states` | `scripts/warmstart_probe.py` | Added `_make_carry()` helper; replaced hardcoded fp32 |
+| `warmstart_probe.compute_execution_faithfulness` | `scripts/warmstart_probe.py` | Same `_make_carry()` helper |
+| `trainer.step` | `src/marifah/training/trainer.py` | Simplified to `InnerCarry.zeros(B, self.config.model, self.device)` |
+
+**`InnerCarry.zeros` factory** added to `coral_base.py`:
+- Reads `model_config.forward_dtype` (duck-typed `Any` to avoid circular imports)
+- Accepts `dtype_override` for CPU bf16 fallback in probe script
+- Single source of truth: all four call sites now funnel through this method
+
+**`_make_carry()` helper in `warmstart_probe.py`:**
+- CPU + forward_dtype=bfloat16 → warns and falls back to float32 (flash-attn requires CUDA)
+- GPU + forward_dtype=bfloat16 → passes through correctly
+
+**New test file:** `tests/test_dtype_propagation.py` (3 passed, 1 skipped-no-CUDA):
+- `test_carry_dtype_propagates_through_all_call_sites` — monkey-patches `InnerCarry.__init__` to record z_H dtypes; asserts all 4+ carry constructions use `config.model.forward_dtype`. float32 runs on CPU; bfloat16 skipped without CUDA.
+- `test_inner_carry_zeros_factory_uses_config_dtype` — factory unit test, float32 + bfloat16
+- `test_inner_carry_zeros_dtype_override` — dtype_override wins over model_config
+
+**New script:** `scripts/verify_pipeline_e2e.py`:
+- 4-phase: (1) 4-step training, (2) eval pass, (3) probe pass (n=16), (4) PASS/FAIL summary
+- Target runtime: <5 min on A100 SXM4 80GB
+- Usage: `python scripts/verify_pipeline_e2e.py --dataset /workspace/data/... --config configs/warmstart_cold.yaml`
+- Do NOT run locally — GPU-only verification
+
+**Test count: 308/308 (was 305 before this work)**
+
 **Open items for Session 7:**
 - Phase 0 main launch (same instance, same runbook pattern as warm-start comparison)
 - Early checkpoint probe at ~5K steps (codebook §8.2: AUC < 0.3 → stop)
 - Midpoint probe at ~20K steps
 - Final probe at ~50K+ steps (§7 decision gate: Path A/B/C)
+- Run `verify_pipeline_e2e.py` on Vast before Phase 0 launch

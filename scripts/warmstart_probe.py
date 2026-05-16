@@ -37,6 +37,29 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Carry construction helper
+# ---------------------------------------------------------------------------
+
+
+def _make_carry(B: int, config: Any, device: torch.device) -> Any:
+    """Construct a zero carry with correct dtype; falls back to float32 on CPU when bf16 configured.
+
+    bf16 is not fully supported on all CPU paths (flash-attn requires CUDA).
+    When --device cpu is used with forward_dtype=bfloat16, we warn and use float32.
+    """
+    from marifah.models.coral_base import InnerCarry
+
+    dtype_override = None
+    if device.type == "cpu" and getattr(config.model, "forward_dtype", "float32") == "bfloat16":
+        logger.warning(
+            "CPU device with forward_dtype=bfloat16: using float32 for carry "
+            "(bf16 not fully supported on all CPU paths — GPU required for flash-attn)"
+        )
+        dtype_override = torch.float32
+    return InnerCarry.zeros(B, config.model, device, dtype_override=dtype_override)
+
+
+# ---------------------------------------------------------------------------
 # Carry-state extraction
 # ---------------------------------------------------------------------------
 
@@ -54,7 +77,6 @@ def _extract_carry_states(
         carry_states : float32 array of shape (N, d_model)
         labels       : int array of shape (N,) — workflow_type_id (0-indexed)
     """
-    from marifah.models.coral_base import InnerCarry
     from marifah.training.graph_utils import prepare_batch_for_model
 
     model.eval()
@@ -65,13 +87,8 @@ def _extract_carry_states(
         for batch in data_loader:
             batch = batch.to(device)
             B = batch.batch_size
-            max_nodes = config.model.max_nodes
-            d_model = config.model.d_model
 
-            carry = InnerCarry(
-                z_H=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=device),
-                z_L=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=device),
-            )
+            carry = _make_carry(B, config, device)
 
             coral_batch = prepare_batch_for_model(batch, config, device)
             result = model(carry, coral_batch, is_last_segment=True)
@@ -224,7 +241,6 @@ def compute_execution_faithfulness(
         catastrophic_failure_rate    — fraction with edit distance > 50% of trace length
         n_samples                    — number of DAGs evaluated
     """
-    from marifah.models.coral_base import InnerCarry
     from marifah.training.graph_utils import prepare_batch_for_model
 
     model.eval()
@@ -235,13 +251,8 @@ def compute_execution_faithfulness(
         for batch in data_loader:
             batch = batch.to(device)
             B = batch.batch_size
-            max_nodes = config.model.max_nodes
-            d_model = config.model.d_model
 
-            carry = InnerCarry(
-                z_H=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=device),
-                z_L=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=device),
-            )
+            carry = _make_carry(B, config, device)
 
             coral_batch = prepare_batch_for_model(batch, config, device)
             result = model(carry, coral_batch, is_last_segment=True)

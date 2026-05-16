@@ -279,14 +279,8 @@ class Trainer:
 
         graph_batch = batch.to(self.device)
         B = graph_batch.batch_size
-        max_nodes = self.config.model.max_nodes
-        d_model = self.config.model.d_model
 
-        carry_dtype = getattr(torch, self.config.model.forward_dtype)
-        carry = InnerCarry(
-            z_H=torch.zeros(B, max_nodes, d_model, dtype=carry_dtype, device=self.device),
-            z_L=torch.zeros(B, max_nodes, d_model, dtype=carry_dtype, device=self.device),
-        )
+        carry = InnerCarry.zeros(B, self.config.model, self.device)
 
         coral_batch = prepare_batch_for_model(graph_batch, self.config, self.device)
 

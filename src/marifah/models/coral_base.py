@@ -8,7 +8,7 @@ Nested recurrence: H_cycles outer × L_cycles inner per segment.
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -94,6 +94,32 @@ class InnerCarry:
 
     z_H: torch.Tensor  # [B, total_seq_len, hidden_size]
     z_L: torch.Tensor  # [B, total_seq_len, hidden_size]
+
+    @classmethod
+    def zeros(
+        cls,
+        batch_size: int,
+        model_config: Any,
+        device: torch.device,
+        dtype_override: Optional[torch.dtype] = None,
+    ) -> "InnerCarry":
+        """Construct a zero-initialized carry with dtype from model_config.
+
+        Single source of truth for carry dtype: reads model_config.forward_dtype
+        so all call sites stay in sync when the config changes.
+
+        Args:
+            batch_size:    B dimension
+            model_config:  ModelConfig with .forward_dtype, .max_nodes, .d_model
+            device:        Target device
+            dtype_override: If provided, use this dtype instead of model_config.forward_dtype.
+                           Used for CPU fallback when bf16 is not fully supported.
+        """
+        dtype = dtype_override if dtype_override is not None else getattr(torch, model_config.forward_dtype)
+        return cls(
+            z_H=torch.zeros(batch_size, model_config.max_nodes, model_config.d_model, dtype=dtype, device=device),
+            z_L=torch.zeros(batch_size, model_config.max_nodes, model_config.d_model, dtype=dtype, device=device),
+        )
 
 
 # ---------------------------------------------------------------------------

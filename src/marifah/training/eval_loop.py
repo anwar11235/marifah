@@ -52,13 +52,8 @@ def evaluate(
         for batch in data_loader:
             graph_batch = batch.to(device)
             B = graph_batch.batch_size
-            max_nodes = config.model.max_nodes
-            d_model = config.model.d_model
 
-            carry = InnerCarry(
-                z_H=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=device),
-                z_L=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=device),
-            )
+            carry = InnerCarry.zeros(B, config.model, device)
 
             coral_batch = prepare_batch_for_model(graph_batch, config, device)
             result = model(carry, coral_batch, is_last_segment=True)
