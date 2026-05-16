@@ -58,7 +58,7 @@ def build_model(config: TrainingConfig, device: torch.device) -> nn.Module:
         num_heads=config.model.num_heads,
         use_predictive_coding=True,
         use_hmsc=False,                  # set explicitly below
-        forward_dtype="float32",
+        forward_dtype=config.model.forward_dtype,
         halt_max_steps=config.model.halt_max_steps,
         halt_exploration_prob=config.model.halt_exploration_prob,
     )
@@ -250,9 +250,10 @@ class Trainer:
         max_nodes = self.config.model.max_nodes
         d_model = self.config.model.d_model
 
+        carry_dtype = getattr(torch, self.config.model.forward_dtype)
         carry = InnerCarry(
-            z_H=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=self.device),
-            z_L=torch.zeros(B, max_nodes, d_model, dtype=torch.float32, device=self.device),
+            z_H=torch.zeros(B, max_nodes, d_model, dtype=carry_dtype, device=self.device),
+            z_L=torch.zeros(B, max_nodes, d_model, dtype=carry_dtype, device=self.device),
         )
 
         coral_batch = prepare_batch_for_model(graph_batch, self.config, self.device)

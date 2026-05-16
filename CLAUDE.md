@@ -466,6 +466,18 @@ Total: 195/195 tests passing (includes all Session 1 + 2 tests).
 - Results JSONs shared back to CC
 - Warm-start verdict written + Phase 0 config finalized
 
+**Bug fix (mid-Session 6, after first Vast.ai launch): flash_attn float32 crash**
+
+Two bugs in `trainer.py` hardcoded float32, causing immediate crash on GPU launch (W&B `79lxh45j`):
+1. `build_model()` line 61: `forward_dtype="float32"` — ignored `config.model.forward_dtype`
+2. `step()` lines 254-255: carry tensor `dtype=torch.float32` — hardcoded, bypassed model dtype
+
+Both lines now use `config.model.forward_dtype`. Three production configs updated: `forward_dtype: "bfloat16"` under `model:` in `warmstart_cold.yaml`, `warmstart_warm.yaml`, `phase0.yaml`. Smoke configs remain `float32` (CPU — flash_attn not triggered).
+
+Checkpoint dtype audit: `load_warmstart` → `strict=False` `load_state_dict` → `copy_()` safely handles dtype transitions. No garbage activation risk.
+
+Note: `mixed_precision` config key is never consumed (no `torch.autocast` in trainer). bf16 is achieved entirely through the Casted layers pattern (`forward_dtype`). `mixed_precision` is dead config — flagged, not fixed.
+
 **Open items for Session 7:**
 - Phase 0 main launch (same instance, same runbook pattern as warm-start comparison)
 - Early checkpoint probe at ~5K steps (codebook §8.2: AUC < 0.3 → stop)

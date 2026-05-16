@@ -20,7 +20,7 @@ model:
   max_nodes: 100
   halt_max_steps: 4
   halt_exploration_prob: 0.1
-  forward_dtype: "float32"
+  forward_dtype: "bfloat16"
 
 training:
   batch_size: 64
