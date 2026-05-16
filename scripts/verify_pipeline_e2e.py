@@ -146,7 +146,7 @@ def _phase3a_delta_probe(
     dataset_root: str,
     checkpoint: str,
     device: torch.device,
-    max_samples: int = 16,
+    max_samples: int = 100,  # 100 minimum required for stratified split with 6+ test classes
 ) -> Tuple[str, Dict[str, Any]]:
     """Δ-probe: AUC(z_H) - AUC(node_features). Verifies substrate adds info beyond inputs."""
     scripts_dir = str(Path(__file__).parent)
@@ -206,7 +206,7 @@ def _phase3b_shuffled_probe(
     dataset_root: str,
     checkpoint: str,
     device: torch.device,
-    max_samples: int = 16,
+    max_samples: int = 100,  # 100 minimum required for stratified split with 6+ test classes
 ) -> Tuple[str, Dict[str, Any]]:
     """Shuffled-primitive probe: verifies substrate uses graph structure, not just primitive identity."""
     scripts_dir = str(Path(__file__).parent)
@@ -326,7 +326,7 @@ def main() -> None:
             status3a, info3a = _phase3a_delta_probe(args.config, args.dataset, checkpoint, device)
         else:
             status3a, info3a = _FAIL, {"error": "skipped — Phase 1 failed"}
-        results["Phase 3a: delta-probe (n=16)"] = (status3a, info3a)
+        results["Phase 3a: delta-probe (n=100)"] = (status3a, info3a)
 
         # Phase 3b — shuffled-primitive probe (only if Phase 1 produced a checkpoint)
         logger.info("=== Phase 3b: Shuffled-primitive probe ===")
@@ -334,7 +334,7 @@ def main() -> None:
             status3b, info3b = _phase3b_shuffled_probe(args.config, args.dataset, checkpoint, device)
         else:
             status3b, info3b = _FAIL, {"error": "skipped — Phase 1 failed"}
-        results["Phase 3b: shuffled-probe (n=16)"] = (status3b, info3b)
+        results["Phase 3b: shuffled-probe (n=100)"] = (status3b, info3b)
 
     # Phase 4: summary
     all_pass = _print_summary(results)

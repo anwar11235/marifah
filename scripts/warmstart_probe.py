@@ -210,6 +210,8 @@ def compute_workflow_type_auc(
     # Restrict probabilities to classes present in test to avoid OvR NaN.
     class_mask = np.isin(clf.classes_, classes_in_test)
     y_prob_restricted = y_prob[:, class_mask]
+    # Renormalize probabilities to sum=1 across kept classes after column-mask (required by sklearn multiclass roc_auc_score)
+    y_prob_restricted = y_prob_restricted / y_prob_restricted.sum(axis=1, keepdims=True).clip(min=1e-10)
     classes_restricted = clf.classes_[class_mask]
 
     try:
