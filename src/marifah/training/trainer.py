@@ -14,7 +14,14 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Dict, Optional
+
+try:
+    from tqdm import tqdm as _tqdm
+    _TQDM_AVAILABLE = True
+except ImportError:
+    _TQDM_AVAILABLE = False
 
 import torch
 from torch import nn
@@ -160,6 +167,14 @@ class Trainer:
             len(train_loader) * cfg.max_epochs,
             cfg.warmup_steps + 1,
         )
+        total_for_bar = cfg.max_steps if cfg.max_steps is not None else self._total_steps
+
+        use_tqdm = _TQDM_AVAILABLE and sys.stdout.isatty()
+        pbar = (
+            _tqdm(total=total_for_bar, desc="training", unit="step", mininterval=1.0)
+            if use_tqdm else None
+        )
+        heartbeat = self.config.logging.heartbeat_interval_steps
 
         best_val_loss: Optional[float] = None
         patience_counter = 0
@@ -178,6 +193,20 @@ class Trainer:
 
                 if self.global_step % self.config.logging.log_interval_steps == 0:
                     self.logger.log_step(self.global_step, step_losses, self._compute_lr())
+
+                # tqdm progress bar (TTY mode)
+                if pbar is not None:
+                    pbar.update(1)
+                    pbar.set_postfix(
+                        lm_loss=f"{step_losses.get('main', 0.0):.4f}",
+                        lr=f"{self._compute_lr():.2e}",
+                    )
+                # Heartbeat for non-TTY mode (e.g. tee'd log files)
+                elif heartbeat > 0 and self.global_step % heartbeat == 0:
+                    logger.info(
+                        "step=%d | lm_loss=%.4f",
+                        self.global_step, step_losses.get("main", 0.0),
+                    )
 
                 self.global_step += 1
 
@@ -235,6 +264,9 @@ class Trainer:
                     break
 
             self.model.train()
+
+        if pbar is not None:
+            pbar.close()
 
         final = os.path.join(self.config.logging.checkpoint_dir, "final.pt")
         last_epoch = min(self.start_epoch + cfg.max_epochs - 1, cfg.max_epochs - 1)
@@ -316,6 +348,6 @@ class Trainer:
         logger.info("Resumed from %s (step=%d, epoch=%d)",
                     checkpoint_path, self.global_step, self.start_epoch)
 
-    def warmstart(self, checkpoint_path: str) -> None:
-        load_warmstart(checkpoint_path, self.model)
-        logger.info("Warm-started from %s", checkpoint_path)
+    def warmstart(self, checkpoint_path: str, remap: Optional[str] = None) -> None:
+        load_warmstart(checkpoint_path, self.model, remap=remap)
+        logger.info("Warm-started from %s (remap=%s)", checkpoint_path, remap)

@@ -501,6 +501,42 @@ Audit findings (not patched — flagged for review):
 
 3. **max_nodes=100** (`warmstart_cold/warm.yaml`, `phase0.yaml`): Largest single pattern has `max_size=18`; complex workflows have up to 8 patterns → theoretical max ~145 nodes. `GraphDAGDataset` silently filters records with `num_nodes > max_nodes`, so complex DAGs >100 nodes are dropped from training. `test_ood_size` split DAGs scale 2–5× training max in size — if empirical training cap is ~100 nodes, OOD-size DAGs (200–500 nodes) will be entirely filtered, making that eval split empty. Verify empirical size distribution before phase 0 launch; consider raising max_nodes or confirming OOD size split is not used in Phase 0 eval.
 
+**Three-fix session (2026-05-16): data pipeline, checkpoint remap, console progress**
+
+*Context:* warmstart_cold launched at 18:48 (W&B `0ac8373c`) and is training. These fixes done in parallel locally.
+
+**Issue 1 — DataLoader startup (~5 min observed on Vast):**
+Root cause: `GraphDAGDataset.__init__` precomputed Laplacian PE + attention masks for ALL records eagerly in a single-threaded loop. Fix: `_make_loader` now passes `precompute=False`; computation happens lazily in DataLoader worker processes. Timing: 45× faster init (0.013s vs 0.584s for 963 records); extrapolated ~8 min → <30s on 800K rows.
+
+Side-fix: Laplacian eigenvectors lacked sign normalization. `numpy.linalg.eigh` sign is non-deterministic across independent calls; without normalization, the same graph gets different-signed PE from different workers on different epochs. Added sign normalization in `positional.py` (first non-zero element per eigenvector column forced positive).
+
+Timing logs added to `data_pipeline.py` per-split and total.
+
+**Issue 2 — Checkpoint remap (warm-start was silently producing warm ≡ cold):**
+Three root causes identified and fixed via `remap_sudoku_checkpoint()` in `checkpointing.py`:
+1. `model.inner.` prefix (Sudoku structure) → stripped
+2. `_orig_mod.` infix (torch.compile artifact) → stripped  
+3. vocab_size shape mismatch embed/lm_head (11 vs 10) → dropped with WARNING, train from scratch
+
+`load_checkpoint` now:
+- Accepts `remap='sudoku_to_marifah'` kwarg
+- Logs `missing_keys` / `unexpected_keys` at WARNING (Session 6 Audit Finding 1 resolved)
+- Raises `RuntimeError` if substrate param (H_level.*.weight) unchanged after load (prevents silent-drop-to-random-init)
+
+`WarmStartConfig` schema: added `remap: Optional[Literal['sudoku_to_marifah']]`.
+`warmstart_warm.yaml`: `remap: sudoku_to_marifah` added to `warm_start:` block.
+
+The real Sudoku Phase 3c checkpoint loaded successfully via remap (test 5 PASSED — not skipped).
+
+**Issue 3 — Console progress visibility:**
+- tqdm progress bar in TTY mode (step, lm_loss, lr, it/s) — `mininterval=1.0`, `disable=not isatty()`
+- Heartbeat log in non-TTY mode: `step=N | lm_loss=X.XX` every `heartbeat_interval_steps=10` steps (configurable, 0=disable)
+- `heartbeat_interval_steps: int = 10` added to `LoggingConfig`
+- No tensor sync overhead — reads pre-converted CPU floats from `step_losses` dict
+
+**Test count: 305/305 (was 294 before this work)**
+New files: `tests/test_checkpointing.py` (10 tests), 1 new test in `tests/test_adapter_dataset.py`
+
 **Open items for Session 7:**
 - Phase 0 main launch (same instance, same runbook pattern as warm-start comparison)
 - Early checkpoint probe at ~5K steps (codebook §8.2: AUC < 0.3 → stop)
