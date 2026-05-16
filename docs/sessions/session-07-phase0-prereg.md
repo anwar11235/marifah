@@ -250,3 +250,61 @@ Updated `test_ood_composition` capability: ≥25 unique workflow types with n=20
 - Updated `scripts/verify_pipeline_e2e.py` — Phase 3 split into Phase 3a (Δ-probe) + Phase 3b (shuffled-probe)
 
 **Sign-off on Amendment 1:** Anwar Haq, Founder, Aktuator AI — 2026-05-16
+
+---
+
+## Amendment 2 — 2026-05-17
+
+**Pre-registered before any amended-criteria run is executed.**
+
+**Title:** (A) Δ-probe baseline changed to dimensionality-matched random projection; (B) ACT-iterative probe variants added as comparison probes.
+
+### Amendment 2A: Dimensionality-matched Δ-baseline
+
+**Rationale:**
+
+The cold checkpoint probe (5K steps) returned Δ = 0.1772, identical to the random-init probe Δ = 0.1767. Since Δ should be ~0 for random init (substrate adds nothing), this should have raised a flag — it didn't, because the Δ was entirely a dimensional artifact.
+
+Root cause: baseline probe used mean-pooled `node_features` of shape (N, 5), while substrate used mean-pooled `z_H` of shape (N, 512). Comparing 5-dim to 512-dim logistic regression separability is not a fair comparison — higher dimensions make any information linearly separable more easily (curse of dimensionality in reverse). The same 5-dim input information projected into 512-dim is more separable than in 5-dim, so AUC(z_H) > AUC(node_features) even when z_H is a random linear transformation of the inputs.
+
+**Fix:** Project `node_features` from 5-dim to d_model-dim via a **fixed random matrix** (seed=0, unit-norm columns) before baseline probing. Both baseline and substrate now operate in d_model-dim space. The random projection is reproducible and committed alongside the probe code.
+
+**Expected behavior after fix:**
+- Random init: Δ ≈ 0 (substrate IS a random linear transformation of inputs, so its output ≈ random projection baseline)
+- Trained substrate doing semantic work: Δ > 0 (training added structure beyond random projection)
+
+**Change:** In `scripts/delta_probe.py` (and `delta_probe_act.py`), after pooling raw node_features, apply:
+```python
+torch.manual_seed(0)  # FIXED; never randomize this
+proj = torch.randn(raw_dim, d_model)
+proj = proj / proj.norm(dim=0, keepdim=True)
+node_feats = (torch.from_numpy(node_feats_raw) @ proj).numpy()
+```
+
+**Path A threshold unchanged: Δ ≥ 0.10.** With dim-matching, random init is expected at Δ ≈ 0. A trained substrate that genuinely organizes carry states should produce Δ > 0.10.
+
+### Amendment 2B: ACT-iterative probe variants
+
+**Rationale:**
+
+The trainer uses `CoralV3Inner` directly (1-step-gradient training, documented in `trainer.py`). The probes also call `CoralV3Inner`. So both training and measurement happen at single-step. However, `CoralV3ACT` allows 4 iterations of refinement (H→L→halt-check repeated 4 steps) at inference time — the substrate may have capacity to organize representations over 4 refinement steps even if the single-step gradient didn't drive it there.
+
+Adding ACT-iterated probes allows distinguishing:
+- **Training bottleneck hypothesis:** substrate CAN organize at 4-step inference (ACT probes show Δ > 0.10 and auc_shuffled > 0.65) but 1-step training didn't push it there. Fix: switch trainer to use ACT.
+- **Architecture bottleneck hypothesis:** even 4-step ACT shows null result (Δ ≈ 0 and auc_shuffled ≈ 0.50). The substrate cannot organize from this task/training combination regardless of iteration count. Path B: deeper redesign.
+
+**New scripts:**
+- `scripts/delta_probe_act.py` — Δ-probe with ACT-iterated z_H
+- `scripts/shuffled_probe_act.py` — shuffled-primitive probe with ACT-iterated z_H
+- `scripts/check_act_iteration.py` — sanity check (run before probes to confirm ACT iterates and differs from single-step)
+- `tests/test_substrate_probes_act.py` — unit tests (no GPU): iteration count, z_H differs, steps counter
+
+**Path A criteria for ACT-iterated probes** (same thresholds as Amendment 1):
+- Δ-probe ACT: delta ≥ 0.10
+- Shuffled-probe ACT: auc_shuffled ≥ 0.65
+
+**Scope note:** ACT-iterated probes are **comparison probes**, not replacements. The 1-step probes (delta_probe.py, shuffled_probe.py) remain the primary measurement — they measure exactly what training produced. ACT probes measure inference-time upper bound.
+
+**Note on Vast runbook:** run `check_act_iteration.py` before the ACT probes. If it reports `[WARN] IDENTICAL z_H`, the ACT wrapper is not applying iteration correctly — do not proceed with ACT probes until resolved.
+
+**Sign-off on Amendment 2:** Anwar Haq, Founder, Aktuator AI — 2026-05-17
