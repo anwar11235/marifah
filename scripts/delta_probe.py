@@ -101,9 +101,24 @@ def _extract_features_and_labels(
             if len(labels_list) >= max_samples:
                 break
 
-    node_feats = np.concatenate(node_feats_list, axis=0)[:max_samples]
+    node_feats_raw = np.concatenate(node_feats_list, axis=0)[:max_samples]
     z_H_arr = np.concatenate(z_H_list, axis=0)[:max_samples]
     labels = np.array(labels_list[:max_samples], dtype=np.int64)
+
+    # Project node_features to match z_H dimensionality (removes dimensional-inflation artifact).
+    # Without this, comparing 5-dim baseline to 512-dim substrate gives ~0.18 delta from
+    # the curse of dimensionality alone (more dimensions → easier linear separation of same info).
+    raw_dim = node_feats_raw.shape[-1]
+    d_model = z_H_arr.shape[-1]
+    if raw_dim != d_model:
+        rng_proj = torch.Generator()
+        rng_proj.manual_seed(0)  # FIXED projection seed; never randomize this
+        proj = torch.randn(raw_dim, d_model, generator=rng_proj)
+        proj = proj / proj.norm(dim=0, keepdim=True)  # unit-norm columns
+        node_feats = (torch.from_numpy(node_feats_raw) @ proj).numpy()
+    else:
+        node_feats = node_feats_raw
+
     return node_feats, z_H_arr, labels
 
 

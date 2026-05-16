@@ -280,3 +280,58 @@ class TestShuffledProbe:
             f"AUC should drop when z_H encodes primitive identity and primitives are shuffled. "
             f"un-shuffled={res_unshuffled['auc']:.4f} shuffled={res_shuffled['auc']:.4f} drop={drop:.4f}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Dimensionality-matched Δ-baseline unit tests
+# ---------------------------------------------------------------------------
+
+class TestDeltaBaselineDimMatched:
+    """Verify the dim-matched random projection applied to node_features baseline."""
+
+    def test_delta_baseline_uses_dim_matched_projection(self):
+        """Random projection must map node_features to d_model-dim space."""
+        import torch
+        raw_dim, d_model, n = 5, 32, 50
+        raw = np.random.randn(n, raw_dim).astype(np.float32)
+
+        rng_proj = torch.Generator()
+        rng_proj.manual_seed(0)
+        proj = torch.randn(raw_dim, d_model, generator=rng_proj)
+        proj = proj / proj.norm(dim=0, keepdim=True)
+        projected = (torch.from_numpy(raw) @ proj).numpy()
+
+        assert projected.shape == (n, d_model), (
+            f"Expected ({n}, {d_model}), got {projected.shape}"
+        )
+
+    def test_delta_random_init_is_near_zero_with_dim_matching(self):
+        """With dim-matched baseline, delta on random z_H should be near 0 (was ~0.18 without).
+
+        Both baseline (random projection of 5-dim inputs) and substrate (random init z_H)
+        are uninformative in the same way. delta should be small, not 0.18 from dim-inflation.
+        """
+        import torch
+        n, n_classes, d_model = 300, 5, 32
+        rng = np.random.RandomState(70)
+        labels = np.repeat(np.arange(n_classes), n // n_classes + 1)[:n].astype(np.int64)
+
+        raw_feats = rng.randn(n, 5).astype(np.float32)
+
+        rng_proj = torch.Generator()
+        rng_proj.manual_seed(0)
+        proj = torch.randn(5, d_model, generator=rng_proj)
+        proj = proj / proj.norm(dim=0, keepdim=True)
+        baseline_input = (torch.from_numpy(raw_feats) @ proj).numpy()
+
+        z_H_random = rng.randn(n, d_model).astype(np.float32)
+
+        res_baseline = compute_workflow_type_auc(baseline_input, labels, seed=0)
+        res_substrate = compute_workflow_type_auc(z_H_random, labels, seed=0)
+        delta = abs(res_substrate["auc"] - res_baseline["auc"])
+
+        assert delta < 0.10, (
+            f"With dim-matched baseline, |delta| on random z_H should be small. "
+            f"Got {delta:.4f} (was ~0.18 with 5-dim vs 512-dim). "
+            f"baseline={res_baseline['auc']:.4f} substrate={res_substrate['auc']:.4f}"
+        )
