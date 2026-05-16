@@ -290,3 +290,66 @@ class TestTrainSplitWorkflowTypeCoverage:
             f"(expected >= 45 with ood_holdout_seed=13). "
             f"Check docs/sessions/session-06-generator-distribution-finding.md"
         )
+
+
+class TestOodCompositionDiversity:
+    """Verifies that test_ood_composition split has diverse workflow types.
+
+    Root cause of prior 2-class collapse (seed=13):
+      - cross-pattern-only pair check + frequency-weighted sampling → only
+        workflows 7 and 27 could produce OOD-composition DAGs.
+    Fix: use all-edge pair check + round-robin workflow assignment.
+    Expected: >= 25 unique workflow types with n=200 tasks.
+    """
+
+    def test_test_ood_composition_has_diverse_workflow_types(self):
+        """OOD-composition split must have diverse workflow types for substrate probing."""
+        from collections import Counter
+        from marifah.data.synthetic.vertical_config import GeneratorConfig, _hash_config
+        from marifah.data.synthetic.generator import DagGenerator
+
+        cfg = GeneratorConfig(seed=42, ood_holdout_seed=13, ood_holdout_fraction=0.15)
+        cfg.config_hash = _hash_config(cfg)
+
+        gen = DagGenerator(cfg)
+        recs = gen.generate_split(
+            "test_ood_composition", n=200, seed_offset=900_000,
+            require_reserved_pair=True,
+        )
+
+        wf_counts = Counter(r.workflow_type_id for r in recs)
+        n_unique = len(wf_counts)
+
+        assert n_unique >= 25, (
+            f"test_ood_composition has only {n_unique} unique workflow types "
+            f"(expected >= 25; substrate probing requires diverse classes). "
+            f"The all-edge pair check + round-robin sampling should give >= 49/50."
+        )
+
+    def test_ood_composition_records_contain_reserved_pair_in_all_edges(self):
+        """Every OOD-composition record must have a reserved pair in at least one edge."""
+        import networkx as nx
+        from marifah.data.synthetic.vertical_config import GeneratorConfig, _hash_config
+        from marifah.data.synthetic.generator import DagGenerator
+        from marifah.data.synthetic.workflows import build_reserved_primitive_pairs
+
+        cfg = GeneratorConfig(seed=42, ood_holdout_seed=13, ood_holdout_fraction=0.15)
+        cfg.config_hash = _hash_config(cfg)
+        reserved = build_reserved_primitive_pairs(holdout_fraction=0.15, seed=13)
+
+        gen = DagGenerator(cfg)
+        recs = gen.generate_split(
+            "test_ood_composition", n=50, seed_offset=910_000,
+            require_reserved_pair=True,
+        )
+
+        assert len(recs) > 0, "No OOD-composition records generated"
+        for rec in recs:
+            nmap = {n.node_id: n for n in rec.nodes}
+            has_reserved = any(
+                (nmap[e.src].primitive, nmap[e.dst].primitive) in reserved
+                for e in rec.edges
+            )
+            assert has_reserved, (
+                f"DAG {rec.dag_id} (wf={rec.workflow_type_id}) contains no reserved pair"
+            )
