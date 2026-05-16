@@ -247,3 +247,46 @@ class TestCoverageSpotCheck:
         all_prim_ids = {p.value for p in PrimitiveType}
         missing = all_prim_ids - seen_primitives
         assert not missing, f"Primitives not seen in any DAG: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Workflow-type distribution coverage (regression for filter-driven extinction)
+# ---------------------------------------------------------------------------
+
+class TestTrainSplitWorkflowTypeCoverage:
+    """Verifies that the OOD holdout seed does not drive most workflow types extinct.
+
+    Seed=0 caused 40 of 50 types to have 0% training pass rate (boundary pair
+    overlap). Seed=13 reduces this to 1 extinct type. This test checks per-type
+    pass rate using 20 attempts per workflow type — the same diagnostic method
+    used to confirm the root cause and verify the fix.
+    """
+
+    def test_train_split_workflow_type_coverage(self):
+        from marifah.data.synthetic.vertical_config import GeneratorConfig, _hash_config
+        from marifah.data.synthetic.generator import generate_one
+        from marifah.data.synthetic.workflows import build_reserved_primitive_pairs, WORKFLOW_DEFINITIONS
+
+        reserved_pairs = build_reserved_primitive_pairs(holdout_fraction=0.15, seed=13)
+        cfg = GeneratorConfig(seed=42, ood_holdout_seed=13, ood_holdout_fraction=0.15)
+        cfg.config_hash = _hash_config(cfg)
+
+        surviving_types = 0
+        for wf in WORKFLOW_DEFINITIONS:
+            for attempt in range(20):
+                rec = generate_one(
+                    seed=wf.workflow_type_id * 1000 + attempt,
+                    split="train",
+                    config=cfg,
+                    reserved_pairs=reserved_pairs,
+                    workflow_type_id=wf.workflow_type_id,
+                )
+                if rec is not None:
+                    surviving_types += 1
+                    break  # this type passes — move on
+
+        assert surviving_types >= 45, (
+            f"Only {surviving_types} workflow types survive training filter "
+            f"(expected >= 45 with ood_holdout_seed=13). "
+            f"Check docs/sessions/session-06-generator-distribution-finding.md"
+        )

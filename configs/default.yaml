@@ -18,7 +18,7 @@ allow_cycles: false
 
 # OOD composition: reserve 15% of primitive-pair combinations (spec §7.4 / OD4-S)
 ood_holdout_fraction: 0.15
-ood_holdout_seed: 0
+ood_holdout_seed: 13
 
 # OOD size: 2–5× max training DAG size (spec §7.3 / OD3-S)
 ood_size_scale_min: 2.0
