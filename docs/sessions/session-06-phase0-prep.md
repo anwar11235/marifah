@@ -72,6 +72,26 @@ Items 7–11 of the §4 verification sequence, the warm-start verdict, and Phase
 
 ---
 
+## Generator performance fix (discovered mid-Session 6)
+
+Two bugs were found during Vast.ai execution and fixed before the runbook was re-executed:
+
+**Bug 1 — `--workers` defaulted to 1.** On a 64-core Vast.ai instance this left 63 cores idle, producing ~14 min generation time instead of ~30 seconds. Fixed: `--workers` now defaults to `max(1, os.cpu_count() - 1)` for both `generate-tiny` and `generate-full`.
+
+**Bug 2 — Per-split in-memory buffering before any shard write.** The old `_generate()` called `generate_train()` etc., which accumulated all records in RAM before writing a single shard. On a 800K-record full dataset this meant no disk activity for 11+ minutes. Fixed: `_generate()` now calls the new `SplitGenerator.generate_split_streaming()` method, which yields batches of 10 000 records; each batch is written to disk immediately as `shard_NNNN.parquet`. Shards appear on disk within seconds of generation starting.
+
+**New API (all backwards-compatible additions):**
+- `storage.write_shard(records, shard_path)` — write a single shard
+- `storage.write_manifest_from_counts(output_dir, config, split_counts, split_shard_paths)` — manifest without holding all records in memory
+- `generator.DagGenerator.generate_split_streaming(...)` — yields batches; uses `mp.Pool.imap` (ordered) for determinism
+- `SplitGenerator.generate_split_streaming(split_name, batch_size)` — delegates to DagGenerator
+
+**Determinism contract:** `imap` (ordered, not `imap_unordered`) is used, so per-shard contents are byte-identical across runs with the same seed and `num_workers`. `verify_manifest` shard-hash checks still pass.
+
+**Verification:** 291/291 tests pass (11 new tests in `tests/test_synthetic_generator_performance.py`). `generate-tiny` + `validate-dataset` smoke test: PASSED in 1.1 s.
+
+---
+
 ## Known issues / notes for user execution
 
 - **GPU memory not profiled locally** (no GPU on dev machine). Warm-start comparison configs use `batch_size=64, d_model=512, H_layers=2` — same as Phase 0. If OOM occurs, reduce batch_size to 32 and report the observation so Phase 0 config can be adjusted.

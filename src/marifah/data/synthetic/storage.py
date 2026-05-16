@@ -44,6 +44,16 @@ _PARQUET_SCHEMA = pa.schema([
 # Shard writer
 # ---------------------------------------------------------------------------
 
+def write_shard(
+    records: List[DAGRecord],
+    shard_path: Path,
+) -> None:
+    """Write a single shard of records to shard_path."""
+    rows = [r.to_parquet_row() for r in records]
+    table = pa.Table.from_pylist(rows, schema=_PARQUET_SCHEMA)
+    pq.write_table(table, shard_path, compression="snappy")
+
+
 def write_split(
     records: List[DAGRecord],
     output_dir: Path,
@@ -58,10 +68,8 @@ def write_split(
         chunk = records[start: start + SHARD_SIZE]
         if not chunk:
             break
-        rows = [r.to_parquet_row() for r in chunk]
-        table = pa.Table.from_pylist(rows, schema=_PARQUET_SCHEMA)
         shard_path = split_dir / f"shard_{shard_idx:04d}.parquet"
-        pq.write_table(table, shard_path, compression="snappy")
+        write_shard(chunk, shard_path)
         shards.append(shard_path)
 
     return shards
@@ -113,6 +121,60 @@ def write_manifest(
     # Shard hashes
     shard_hashes: Dict[str, List[str]] = {}
     for split, paths in shard_paths.items():
+        shard_hashes[split] = [_sha256_file(p) for p in paths]
+
+    manifest = {
+        "generator_version": generator_version,
+        "config_hash": config.config_hash,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "seed": config.seed,
+        "splits": summary,
+        "shard_hashes": shard_hashes,
+    }
+
+    manifest_path = output_dir / "manifest.json"
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+
+    config_path = output_dir / "generator_config.json"
+    with open(config_path, "w") as fh:
+        json.dump({
+            "primitives": config.primitive_names,
+            "allow_cycles": config.allow_cycles,
+            "ood_holdout_fraction": config.ood_holdout_fraction,
+            "ood_size_scale_min": config.ood_size_scale_min,
+            "ood_size_scale_max": config.ood_size_scale_max,
+            "seed": config.seed,
+            "config_hash": config.config_hash,
+            "split_sizes": {
+                "train": config.split_sizes.train,
+                "val": config.split_sizes.val,
+                "test_id": config.split_sizes.test_id,
+                "test_ood_size": config.split_sizes.test_ood_size,
+                "test_ood_composition": config.split_sizes.test_ood_composition,
+            },
+        }, fh, indent=2)
+
+    return manifest_path
+
+
+def write_manifest_from_counts(
+    output_dir: Path,
+    config: GeneratorConfig,
+    split_counts: Dict[str, int],
+    split_shard_paths: Dict[str, List[Path]],
+    generator_version: str = "session-2",
+) -> Path:
+    """Write manifest.json from record counts and shard paths.
+
+    Streaming alternative to write_manifest — does not require all records
+    in memory.  Summary stats (mean/max/min nodes) are omitted; only count
+    is recorded per split.
+    """
+    summary: Dict[str, Any] = {split: {"count": count} for split, count in split_counts.items()}
+
+    shard_hashes: Dict[str, List[str]] = {}
+    for split, paths in split_shard_paths.items():
         shard_hashes[split] = [_sha256_file(p) for p in paths]
 
     manifest = {

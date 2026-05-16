@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
+
+_cpu = os.cpu_count()
+DEFAULT_WORKERS = max(1, _cpu - 1) if _cpu else 1
 
 from marifah.data.synthetic.generator import DagGenerator
 from marifah.data.synthetic.splits import SplitGenerator
@@ -21,6 +25,8 @@ from marifah.data.synthetic.storage import (
     load_manifest,
     verify_manifest,
     write_manifest,
+    write_manifest_from_counts,
+    write_shard,
     write_split,
 )
 from marifah.data.synthetic.validate import (
@@ -45,20 +51,32 @@ def _generate(
     t0 = time.time()
     sg = SplitGenerator(config, num_workers=num_workers)
 
-    all_records = {}
-    all_shards = {}
+    all_shard_paths: dict = {}
+    all_record_counts: dict = {}
 
     for split_name in ["train", "val", "test_id", "test_ood_size", "test_ood_composition"]:
         print(f"  Generating {split_name}...", flush=True)
-        records = getattr(sg, f"generate_{split_name.replace('-', '_')}")()
-        all_records[split_name] = records
-        shards = write_split(records, output_dir, split_name)
-        all_shards[split_name] = shards
-        print(f"    -> {len(records)} records, {len(shards)} shards", flush=True)
+        split_dir = output_dir / split_name
+        split_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest_path = write_manifest(output_dir, config, all_records, all_shards)
+        shard_count = 0
+        record_count = 0
+        shard_paths = []
+        for batch in sg.generate_split_streaming(split_name, batch_size=10_000):
+            shard_path = split_dir / f"shard_{shard_count:04d}.parquet"
+            write_shard(batch, shard_path)
+            shard_paths.append(shard_path)
+            shard_count += 1
+            record_count += len(batch)
+            print(f"    {split_name} shard {shard_count}: {record_count} records so far", flush=True)
+
+        all_shard_paths[split_name] = shard_paths
+        all_record_counts[split_name] = record_count
+        print(f"    -> {record_count} records, {shard_count} shards", flush=True)
+
+    manifest_path = write_manifest_from_counts(output_dir, config, all_record_counts, all_shard_paths)
     elapsed = time.time() - t0
-    total = sum(len(v) for v in all_records.values())
+    total = sum(all_record_counts.values())
     print(f"\n{label}: {total} DAGs in {elapsed:.1f}s -> {output_dir}")
     print(f"Manifest: {manifest_path}")
 
@@ -189,12 +207,18 @@ def main(argv: list[str] | None = None) -> int:
     p_tiny = sub.add_parser("generate-tiny", help="Generate ~1K DAGs for smoke testing")
     p_tiny.add_argument("--config", required=True, help="Path to YAML config")
     p_tiny.add_argument("--output", required=True, help="Output directory")
-    p_tiny.add_argument("--workers", type=int, default=1)
+    p_tiny.add_argument(
+        "--workers", type=int, default=DEFAULT_WORKERS,
+        help=f"Number of worker processes (default: {DEFAULT_WORKERS} = cpu_count() - 1)",
+    )
 
     p_full = sub.add_parser("generate-full", help="Generate full dataset")
     p_full.add_argument("--config", required=True, help="Path to YAML config")
     p_full.add_argument("--output", required=True, help="Output directory")
-    p_full.add_argument("--workers", type=int, default=1)
+    p_full.add_argument(
+        "--workers", type=int, default=DEFAULT_WORKERS,
+        help=f"Number of worker processes (default: {DEFAULT_WORKERS} = cpu_count() - 1)",
+    )
 
     p_val = sub.add_parser("validate-dataset", help="Validate a generated dataset")
     p_val.add_argument("dataset_path", help="Path to dataset root")

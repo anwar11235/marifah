@@ -21,7 +21,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple
 
 import networkx as nx
 import numpy as np
@@ -461,6 +461,63 @@ class DagGenerator:
                     records.append(rec)
 
         return records
+
+    def generate_split_streaming(
+        self,
+        split: str,
+        n: int,
+        seed_offset: int,
+        *,
+        ood_size: bool = False,
+        require_reserved_pair: bool = False,
+        num_workers: int = 1,
+        batch_size: int = 10_000,
+    ) -> Iterator[List[DAGRecord]]:
+        """Generate n DAG records for one split, yielding batches as they complete.
+
+        Uses imap (ordered) when num_workers > 1 to preserve per-shard
+        determinism: given the same seed and num_workers, shard contents are
+        byte-identical across runs.
+        """
+        import multiprocessing as mp
+
+        if split == "train":
+            tasks = self._build_train_tasks(seed_offset)
+            tasks = (tasks * ((n // len(tasks)) + 1))[:n]
+        else:
+            tasks = [
+                GenerationTask(
+                    seed=seed_offset + i,
+                    split=split,
+                    workflow_type_id=None,
+                    require_reserved_pair=require_reserved_pair,
+                    ood_size=ood_size,
+                )
+                for i in range(n)
+            ]
+
+        args_list = [(t, self.config, self.reserved_pairs) for t in tasks]
+        batch: List[DAGRecord] = []
+
+        if num_workers > 1:
+            with mp.Pool(processes=num_workers) as pool:
+                for rec in pool.imap(_worker, args_list, chunksize=100):
+                    if rec is not None:
+                        batch.append(rec)
+                        if len(batch) >= batch_size:
+                            yield batch
+                            batch = []
+        else:
+            for args in args_list:
+                rec = _worker(args)
+                if rec is not None:
+                    batch.append(rec)
+                    if len(batch) >= batch_size:
+                        yield batch
+                        batch = []
+
+        if batch:
+            yield batch
 
     def benchmark_throughput(self, n: int = 200, num_workers: int = 1) -> float:
         """Return DAGs/sec over a sample of n DAGs."""

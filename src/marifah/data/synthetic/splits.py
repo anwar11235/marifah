@@ -6,7 +6,7 @@ Splits use disjoint seed ranges so no DAG can appear in more than one split.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 from marifah.data.synthetic.generator import DagGenerator, GenerationTask
 from marifah.data.synthetic.labels import DAGRecord
@@ -96,6 +96,26 @@ class SplitGenerator:
             "test_ood_composition", n, sr.start,
             require_reserved_pair=True,
             num_workers=self.num_workers,
+        )
+
+    def generate_split_streaming(
+        self,
+        split_name: str,
+        batch_size: int = 10_000,
+    ) -> Iterator[List[DAGRecord]]:
+        """Yield batches of records for split_name, streaming shards to disk progressively."""
+        sr = self.seed_ranges[split_name]
+        n = getattr(self.config.split_sizes, split_name)
+        extra_kwargs: Dict[str, bool] = {}
+        if split_name == "test_ood_size":
+            extra_kwargs["ood_size"] = True
+        elif split_name == "test_ood_composition":
+            extra_kwargs["require_reserved_pair"] = True
+        yield from self.generator.generate_split_streaming(
+            split_name, n, sr.start,
+            num_workers=self.num_workers,
+            batch_size=batch_size,
+            **extra_kwargs,
         )
 
     def generate_all(self) -> Dict[str, List[DAGRecord]]:
