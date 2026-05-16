@@ -98,3 +98,32 @@ class TestGraphDAGDataset:
         ds = GraphDAGDataset(tiny_val_dir)
         for i in range(len(ds)):
             assert ds[i]["halt_step"] >= 0
+
+    def test_precompute_false_identical_output(self, tiny_val_dir):
+        """precompute=False (lazy) must produce byte-identical __getitem__ results.
+
+        Regression guard: data_pipeline.py passes precompute=False so that
+        Laplacian PE and attention masks are computed lazily in DataLoader
+        workers instead of eagerly in the main process at init.
+        """
+        import numpy as np
+
+        ds_pre = GraphDAGDataset(tiny_val_dir, precompute=True)
+        ds_lazy = GraphDAGDataset(tiny_val_dir, precompute=False)
+        assert len(ds_pre) == len(ds_lazy)
+
+        for i in range(min(len(ds_pre), 10)):
+            item_pre = ds_pre[i]
+            item_lazy = ds_lazy[i]
+            for k in ("node_feat", "pos_encoding", "attention_mask"):
+                a, b = item_pre[k], item_lazy[k]
+                if isinstance(a, torch.Tensor):
+                    # pos_encoding: eigenvectors are float32 with inherent LAPACK
+                    # precision variation (~1e-6) between independent eigh calls.
+                    # Use loose atol; sign normalization in positional.py ensures
+                    # signs are consistent, so only magnitude precision matters.
+                    atol = 1e-5 if k == "pos_encoding" else 1e-8
+                    assert torch.allclose(a, b, atol=atol), f"item {i}: {k} differs"
+                else:
+                    atol = 1e-5 if k == "pos_encoding" else 1e-8
+                    assert np.allclose(a, b, atol=atol), f"item {i}: {k} differs"

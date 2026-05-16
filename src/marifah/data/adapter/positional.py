@@ -96,7 +96,18 @@ def compute_laplacian_pe(
             return pe
 
         start = nonzero_idx[0]
-        selected = eigenvectors[:, start : start + k]  # (num_nodes, ≤k)
+        selected = eigenvectors[:, start : start + k].copy()  # (num_nodes, ≤k)
+
+        # Sign-normalize: eigenvectors are only defined up to sign; fix convention so
+        # that the first element with |value| > 1e-7 in each column is positive.
+        # Without this, precompute=False (lazy, per-worker) can produce sign flips
+        # relative to precompute=True (eager, single-threaded at init).
+        for col in range(selected.shape[1]):
+            col_vals = selected[:, col]
+            nz = col_vals[np.abs(col_vals) > 1e-7]
+            if len(nz) > 0 and nz[0] < 0:
+                selected[:, col] = -col_vals
+
         actual = min(selected.shape[1], k)
         pe[:, :actual] = selected[:, :actual].astype(np.float32)
 

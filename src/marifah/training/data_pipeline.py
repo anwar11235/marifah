@@ -8,6 +8,7 @@ CORAL model's seq_len stays constant across batches.
 from __future__ import annotations
 
 import logging
+import time
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -102,10 +103,13 @@ def _make_loader(
         logger.warning("Split directory not found, skipping: %s", split_dir)
         return None
 
+    t0 = time.perf_counter()
     ds = GraphDAGDataset(
         split_dir=split_dir,
         max_nodes=config.model.max_nodes,
+        precompute=False,   # lazy: PE + mask computed per-item in DataLoader workers
     )
+    t1 = time.perf_counter()
     if len(ds) == 0:
         logger.warning("Empty dataset at %s, skipping", split_dir)
         return None
@@ -115,7 +119,7 @@ def _make_loader(
     generator = torch.Generator()
     generator.manual_seed(config.experiment.seed)
 
-    return DataLoader(
+    loader = DataLoader(
         ds,
         batch_size=config.training.batch_size,
         shuffle=shuffle,
@@ -125,6 +129,11 @@ def _make_loader(
         drop_last=drop_last,
         generator=generator if shuffle else None,
     )
+    logger.info(
+        "DataLoader built: split=%s | records=%d | build_time=%.2fs",
+        split_dir.name, len(ds), t1 - t0,
+    )
+    return loader
 
 
 def build_data_loaders(config: TrainingConfig) -> Dict[str, Optional[DataLoader]]:
@@ -137,17 +146,16 @@ def build_data_loaders(config: TrainingConfig) -> Dict[str, Optional[DataLoader]
     root = Path(config.data.dataset_root)
     loaders: Dict[str, Optional[DataLoader]] = {}
 
+    t_all = time.perf_counter()
     for split in _SPLITS:
         split_dir = root / split
         shuffle = (split == "train")
         drop = config.data.drop_last if split == "train" else False
         loaders[split] = _make_loader(split_dir, config, shuffle=shuffle, drop_last=drop)
-        if loaders[split] is not None:
-            logger.info(
-                "Built DataLoader for split=%s | size=%d | batch=%d",
-                split,
-                len(loaders[split].dataset),  # type: ignore[arg-type]
-                config.training.batch_size,
-            )
 
+    logger.info(
+        "All DataLoaders built in %.2fs | splits with data: %s",
+        time.perf_counter() - t_all,
+        [s for s, dl in loaders.items() if dl is not None],
+    )
     return loaders
